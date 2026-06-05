@@ -18,7 +18,7 @@ in your system. Below are the requirements and their tested versions:
 The first step to build libavtp is to generate the build system files.
 
 ```
-$ meson build
+$ meson setup build
 ```
 
 Then build libavtp by running the following command. The building artifacts
