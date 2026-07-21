@@ -40,7 +40,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "crf-common.h"
+#include "crf-profile.h"
 #include "crf-receiver.h"
 #include "pi-hw.h"
 #include "clock-adjust.h"
@@ -50,7 +50,6 @@
 #define SERVO_STEP_THRESH	100000000.0
 
 #define EDGE_FREQ_HZ		300
-#define NSEC_PER_SEC		1000000000ULL
 
 /* TAI-UTC offset (leap seconds). CRF timestamps are TAI;
  * GPIO edge timestamps are CLOCK_REALTIME (UTC). */
@@ -309,8 +308,9 @@ static void on_crf_drop(uint8_t expected, uint8_t actual, void *ctx)
 
 	pkt_dropped += gap;
 
-	/* Drain stale edges that accumulated during the gap */
-	unsigned int stale = gap * CRF_TIMESTAMPS_PER_PKT;
+	/* Drain stale edges that accumulated during the gap. One edge per CRF
+	 * timestamp, so the count follows from the stream profile. */
+	unsigned int stale = gap * crf_receiver_profile(crf_rx)->timestamps_per_pdu;
 	for (unsigned int i = 0; i < stale; i++) {
 		uint64_t discard;
 		if (gpio_edge_read_nonblock(gpio_edge_fd, &discard) < 0)

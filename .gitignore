@@ -1,5 +1,9 @@
 build
 *~
 
-metrics/*
-refs/*
+# Local-only directories, matched at any depth.
+#   metrics/ - captured run data, plots and CSV logs
+#   refs/    - upstream sources and vendor docs kept on disk for lookup,
+#              never built and never tracked
+metrics/
+refs/

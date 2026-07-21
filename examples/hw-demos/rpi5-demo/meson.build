@@ -4,9 +4,8 @@
 common_src = files('../../common.c')
 
 # Shared modules from hw-demos/common/
-crf_common_src = files('../common/crf-common.c')
+crf_profile_src = files('../common/crf-profile.c')
 crf_receiver_src = files('../common/crf-receiver.c')
-phc_utils_src = files('../common/phc-utils.c')
 pi_servo_src = files('../common/pi-hw.c')
 
 inc = [
@@ -21,9 +20,8 @@ executable(
 	'crf-listener-rpi.c',
 	'rp1-clock.c',
 	common_src,
-	crf_common_src,
+	crf_profile_src,
 	crf_receiver_src,
-	phc_utils_src,
 	pi_servo_src,
 	include_directories: inc,
 	link_with: avtp_lib,

@@ -66,7 +66,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "crf-common.h"
+#include "crf-profile.h"
 #include "crf-receiver.h"
 #include "pi-hw.h"
 #include "clock-adjust.h"
@@ -78,10 +78,13 @@
 #define SERVO_STEP_THRESH	100000000.0
 
 #define PWM_GPIO		12
-#define PWM_FREQ_HZ		300
 
-/* Tolerance: ±half of one 300Hz period (~1.67ms) */
-#define EDGE_TOLERANCE_NS	(NSEC_PER_SEC / (PWM_FREQ_HZ * 2))
+/* CRF stream profile. The PWM output rate and the servo's phase window are
+ * both derived from it, so the edge rate the hardware generates always
+ * matches the stream the receiver accepts. */
+static struct crf_profile profile;
+static unsigned int edge_freq_hz;	/* base_freq / timestamp_interval */
+static int64_t edge_tolerance_ns;	/* half an edge period */
 
 static char ifname[IFNAMSIZ];
 static uint8_t crf_macaddr[ETH_ALEN];
@@ -199,7 +202,7 @@ static bool synchronize(uint64_t crf_ts)
 	while (extts_read_nonblock(&edge_ts) == 0) {
 		int64_t delta = (int64_t)(edge_ts - crf_ts);
 
-		if (llabs(delta) <= EDGE_TOLERANCE_NS) {
+		if (llabs(delta) <= edge_tolerance_ns) {
 			fprintf(stderr, "Synchronized: delta=%+" PRId64 "ns\n",
 				delta);
 			return true;
@@ -248,7 +251,7 @@ static void on_crf_timestamps(uint64_t *timestamps, int count, uint8_t seq,
 
 		int64_t phase_error = (int64_t)(edge_ts - timestamps[i]);
 
-		if (llabs(phase_error) > EDGE_TOLERANCE_NS) {
+		if (llabs(phase_error) > edge_tolerance_ns) {
 			edge_miss_count++;
 			synchronized = false;
 			continue;
@@ -291,8 +294,9 @@ static void on_crf_drop(uint8_t expected, uint8_t actual, void *ctx)
 
 	pkt_dropped += gap;
 
-	/* Drain the stale edges that accumulated during the gap */
-	unsigned int stale = gap * CRF_TIMESTAMPS_PER_PKT;
+	/* Drain the stale edges that accumulated during the gap. One edge per
+	 * CRF timestamp, so the count follows from the stream profile. */
+	unsigned int stale = gap * profile.timestamps_per_pdu;
 	for (unsigned int i = 0; i < stale; i++) {
 		uint64_t discard;
 		if (phc_extts_read(ptp_fd, 0, &discard) < 0)
@@ -328,6 +332,10 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	crf_profile_init(&profile);
+	edge_freq_hz = (unsigned int)crf_profile_edge_hz(&profile);
+	edge_tolerance_ns = crf_profile_edge_tolerance_ns(&profile);
+
 	setlinebuf(stderr);
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
@@ -338,10 +346,12 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	fprintf(stderr, "CRF Listener — Hardware Clock Recovery (1:1 PLL, 300Hz)\n");
-	fprintf(stderr, "  GPIO %d: %d Hz → CS2600 CLK_IN → AUX_OUT → i226 SDP0\n",
-		PWM_GPIO, PWM_FREQ_HZ);
-	fprintf(stderr, "  Servo: %d Hz (1:1 CRF-to-edge)\n\n", PWM_FREQ_HZ);
+	fprintf(stderr, "CRF Listener — Hardware Clock Recovery (1:1 PLL, %u Hz)\n",
+		edge_freq_hz);
+	fprintf(stderr, "  GPIO %d: %u Hz → CS2600 CLK_IN → AUX_OUT → i226 SDP0\n",
+		PWM_GPIO, edge_freq_hz);
+	fprintf(stderr, "  Servo: %u Hz (1:1 CRF-to-edge, tol ±%" PRId64 " us)\n\n",
+		edge_freq_hz, edge_tolerance_ns / 1000);
 
 	res = bcm2711_pwm_clock_init(PWM_GPIO, &pwm_clock);
 	if (res < 0) {
@@ -352,7 +362,7 @@ int main(int argc, char *argv[])
 	clock_adjust = pwm_clock_adjust;
 	clock_adjust_ctx = pwm_clock;
 
-	res = bcm2711_pwm_clock_prepare(pwm_clock, PWM_FREQ_HZ);
+	res = bcm2711_pwm_clock_prepare(pwm_clock, edge_freq_hz);
 	if (res < 0) {
 		fprintf(stderr, "Failed to prepare PWM\n");
 		goto err_pwm;
@@ -435,6 +445,7 @@ int main(int argc, char *argv[])
 		.on_timestamps = on_crf_timestamps,
 		.on_drop = on_crf_drop,
 		.callback_ctx = NULL,
+		.profile = &profile,
 	};
 
 	crf_rx = crf_receiver_create(&rx_cfg);

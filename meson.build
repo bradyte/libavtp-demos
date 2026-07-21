@@ -123,6 +123,19 @@ if cmocka.found()
 		dependencies: cmocka,
 		build_by_default: false,
 	)
+
+	test_crf_profile = executable(
+		'test-crf-profile',
+		'unit/test-crf-profile.c',
+		'examples/hw-demos/common/crf-profile.c',
+		include_directories: [
+			include_directories('include'),
+			include_directories('examples/hw-demos/common'),
+		],
+		link_with: avtp_lib,
+		dependencies: cmocka,
+		build_by_default: false,
+	)
 	test('AVTP API', test_avtp)
 	test('Stream API', test_stream)
 	test('AAF API', test_aaf)
@@ -131,6 +144,7 @@ if cmocka.found()
 	test('RVF API', test_rvf)
 	test('IEC61883/IIDC API', test_ieciidc)
 	test('VSF Stream API', test_vsf_stream)
+	test('CRF Profile', test_crf_profile)
 endif
 
 cc = meson.get_compiler('c')

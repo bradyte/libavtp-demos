@@ -19,13 +19,14 @@
 #include "avtp.h"
 #include "avtp_crf.h"
 #include "examples/common.h"
-#include "crf-common.h"
+#include "crf-profile.h"
 #include "crf-receiver.h"
 
 struct crf_receiver {
 	int fd;
-	struct crf_stream_config cfg;
-	uint8_t seq_num;
+	struct crf_profile profile;
+	enum crf_strictness mode;
+	bool reported_mismatch;
 	uint8_t expected_seq_num;
 	bool first_packet;
 	uint64_t pkt_count;
@@ -34,6 +35,17 @@ struct crf_receiver {
 	crf_drop_callback_fn on_drop;
 	void *callback_ctx;
 };
+
+void crf_receiver_set_strict(struct crf_receiver *rx, bool strict)
+{
+	if (rx)
+		rx->mode = strict ? CRF_STRICT : CRF_LENIENT;
+}
+
+const struct crf_profile *crf_receiver_profile(const struct crf_receiver *rx)
+{
+	return rx ? &rx->profile : NULL;
+}
 
 struct crf_receiver *crf_receiver_create(const struct crf_receiver_config *cfg)
 {
@@ -59,7 +71,10 @@ struct crf_receiver *crf_receiver_create(const struct crf_receiver_config *cfg)
 	rx->on_drop = cfg->on_drop;
 	rx->callback_ctx = cfg->callback_ctx;
 
-	crf_config_init(&rx->cfg);
+	if (cfg->profile)
+		rx->profile = *cfg->profile;
+	else
+		crf_profile_init(&rx->profile);
 
 	return rx;
 }
@@ -84,7 +99,7 @@ struct crf_receiver *crf_receiver_create_from_fd(int fd,
 	rx->on_drop = on_drop;
 	rx->callback_ctx = ctx;
 
-	crf_config_init(&rx->cfg);
+	crf_profile_init(&rx->profile);
 
 	return rx;
 }
@@ -104,26 +119,48 @@ int crf_receiver_fd(const struct crf_receiver *rx)
 	return rx ? rx->fd : -1;
 }
 
+/* Report a non-conformant field once per stream. Under CRF_LENIENT the PDU is
+ * still delivered, so without this the mismatch would go unseen. */
+static void report_mismatch(struct crf_receiver *rx,
+			    const struct crf_pdu_info *info,
+			    enum crf_pdu_status status)
+{
+	if (!info->bad_field || rx->reported_mismatch)
+		return;
+
+	rx->reported_mismatch = true;
+	fprintf(stderr,
+		"CRF: %s field '%s' = %" PRIu64 ", profile expects %" PRIu64
+		"%s\n",
+		status == CRF_PDU_OK ? "non-conformant" : "rejected",
+		info->bad_field, info->bad_got, info->bad_want,
+		status == CRF_PDU_OK ? " (accepted; --strict would drop it)"
+				     : "");
+}
+
 int crf_receiver_process(struct crf_receiver *rx)
 {
-	struct avtp_crf_pdu *pdu = alloca(CRF_PDU_SIZE);
-	uint64_t timestamps[CRF_TIMESTAMPS_PER_PKT];
+	size_t pdu_size = crf_profile_pdu_size(&rx->profile);
+	struct avtp_crf_pdu *pdu = alloca(pdu_size);
+	struct crf_pdu_info info;
+	enum crf_pdu_status status;
 	uint8_t seq;
-	int num_ts;
 	ssize_t n;
 
-	memset(pdu, 0, CRF_PDU_SIZE);
-	n = recv(rx->fd, pdu, CRF_PDU_SIZE, 0);
+	memset(pdu, 0, pdu_size);
+	n = recv(rx->fd, pdu, pdu_size, 0);
 	if (n < 0)
 		return (errno == EAGAIN || errno == EINTR) ? 0 : -1;
 
-	if (n != CRF_PDU_SIZE)
+	status = crf_pdu_parse(pdu, (size_t)n, &rx->profile, rx->mode, &info);
+	if (status != CRF_PDU_OK) {
+		if (status == CRF_PDU_PROFILE)
+			report_mismatch(rx, &info, status);
 		return 0;
+	}
+	report_mismatch(rx, &info, status);
 
-	if (!crf_pdu_validate(pdu, &rx->cfg, &rx->seq_num))
-		return 0;
-
-	seq = rx->seq_num - 1;
+	seq = info.seq_num;
 
 	if (!rx->first_packet) {
 		uint8_t gap = seq - rx->expected_seq_num;
@@ -139,26 +176,23 @@ int crf_receiver_process(struct crf_receiver *rx)
 
 	rx->pkt_count++;
 
-	num_ts = crf_pdu_get_timestamps(pdu, timestamps, CRF_TIMESTAMPS_PER_PKT);
-	if (num_ts != CRF_TIMESTAMPS_PER_PKT)
-		return 0;
-
-	rx->on_timestamps(timestamps, num_ts, seq, rx->callback_ctx);
+	rx->on_timestamps(info.timestamps, info.count, seq, rx->callback_ctx);
 
 	return 0;
 }
 
 uint64_t crf_receiver_wait_first(struct crf_receiver *rx, int timeout_sec)
 {
-	struct avtp_crf_pdu *pdu = alloca(CRF_PDU_SIZE);
-	uint64_t timestamps[CRF_TIMESTAMPS_PER_PKT];
+	size_t pdu_size = crf_profile_pdu_size(&rx->profile);
+	struct avtp_crf_pdu *pdu = alloca(pdu_size);
+	struct crf_pdu_info info;
 	int elapsed = 0;
 
 	while (elapsed < timeout_sec) {
 		struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
 		fd_set readfds;
 		ssize_t n;
-		int res, num_ts;
+		int res;
 
 		FD_ZERO(&readfds);
 		FD_SET(rx->fd, &readfds);
@@ -169,25 +203,23 @@ uint64_t crf_receiver_wait_first(struct crf_receiver *rx, int timeout_sec)
 			continue;
 		}
 
-		memset(pdu, 0, CRF_PDU_SIZE);
-		n = recv(rx->fd, pdu, CRF_PDU_SIZE, 0);
-		if (n != CRF_PDU_SIZE)
+		memset(pdu, 0, pdu_size);
+		n = recv(rx->fd, pdu, pdu_size, 0);
+		if (n < 0)
 			continue;
 
-		if (!crf_pdu_validate(pdu, &rx->cfg, &rx->seq_num))
+		if (crf_pdu_parse(pdu, (size_t)n, &rx->profile, rx->mode,
+				  &info) != CRF_PDU_OK)
 			continue;
 
 		rx->first_packet = false;
-		rx->expected_seq_num = (rx->seq_num - 1) + 1;
+		rx->expected_seq_num = info.seq_num + 1;
 		rx->pkt_count++;
 
-		num_ts = crf_pdu_get_timestamps(pdu, timestamps,
-						CRF_TIMESTAMPS_PER_PKT);
-		if (num_ts == CRF_TIMESTAMPS_PER_PKT)
-			rx->on_timestamps(timestamps, num_ts,
-					  rx->seq_num - 1, rx->callback_ctx);
+		rx->on_timestamps(info.timestamps, info.count, info.seq_num,
+				  rx->callback_ctx);
 
-		return crf_pdu_get_ts0(pdu);
+		return info.timestamps[0];
 	}
 
 	return 0;

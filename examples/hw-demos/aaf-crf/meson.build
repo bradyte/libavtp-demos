@@ -10,7 +10,7 @@ cs2600_src = files('../common/cs2600.c')
 pi_servo_src = files('../common/pi-hw.c')
 
 # CRF protocol modules (from hw-demos/common/)
-crf_common_src = files('../common/crf-common.c')
+crf_profile_src = files('../common/crf-profile.c')
 crf_receiver_src = files('../common/crf-receiver.c')
 
 inc = [include_directories('../../../include'), include_directories('../../..'), include_directories('../common')]
@@ -32,7 +32,7 @@ executable(
 	'crf-listener-hw',
 	'crf-listener-hw.c',
 	common_src,
-	crf_common_src,
+	crf_profile_src,
 	crf_receiver_src,
 	bcm2711_pwm_clock_src,
 	cs2600_src,
