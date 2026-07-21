@@ -55,6 +55,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "devmem.h"
 #include "rp1-clock.h"
 
 /* RP1 PCIe BAR1 base (from /proc/iomem: 1f00000000-1f003fffff) */
@@ -131,6 +132,7 @@
 #define GP0_NOMINAL_DIV_INT	((unsigned int)(TARGET_I2S_HZ / TARGET_GP0_HZ))
 
 struct rp1_clock {
+	struct devmem_region reg;
 	volatile uint32_t *regs;
 	int mem_fd;
 
@@ -164,34 +166,22 @@ static inline void reg_clr(struct rp1_clock *h, uint32_t offset, uint32_t bits)
 int rp1_clock_init(struct rp1_clock **handle)
 {
 	struct rp1_clock *h;
-	int fd;
-	void *map;
-	off_t phys_addr = RP1_BAR1_BASE + CLOCKS_MAIN_OFFSET;
 	double mult, vco;
+	int fd;
 
 	h = calloc(1, sizeof(*h));
 	if (!h)
 		return -ENOMEM;
 
-	fd = open("/dev/mem", O_RDWR | O_SYNC);
-	if (fd < 0) {
-		fprintf(stderr, "rp1-clock: failed to open /dev/mem: %s\n",
-			strerror(errno));
+	h->reg = (struct devmem_region){ RP1_BAR1_BASE + CLOCKS_MAIN_OFFSET,
+					 MAP_SIZE, "RP1 clocks_main" };
+
+	if (devmem_map(&h->reg, 1, &fd) < 0) {
 		free(h);
 		return -errno;
 	}
 
-	map = mmap(NULL, MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
-		   fd, phys_addr);
-	if (map == MAP_FAILED) {
-		fprintf(stderr, "rp1-clock: mmap failed at 0x%llx: %s\n",
-			(unsigned long long)phys_addr, strerror(errno));
-		close(fd);
-		free(h);
-		return -errno;
-	}
-
-	h->regs = (volatile uint32_t *)map;
+	h->regs = h->reg.base;
 	h->mem_fd = fd;
 
 	/* Program PLL to target VCO (1.572864 GHz for 48 kHz audio family) */
@@ -213,8 +203,7 @@ int rp1_clock_init(struct rp1_clock **handle)
 		}
 		if (!(reg_read(h, PLL_AUDIO_CS) & PLL_CS_LOCK)) {
 			fprintf(stderr, "rp1-clock: PLL failed to relock\n");
-			munmap(map, MAP_SIZE);
-			close(fd);
+			devmem_unmap(&h->reg, 1, fd);
 			free(h);
 			return -ETIMEDOUT;
 		}
@@ -404,10 +393,7 @@ void rp1_clock_cleanup(struct rp1_clock *handle)
 
 	fprintf(stderr, "rp1-clock: clk_gp0 disabled\n");
 
-	if (handle->regs)
-		munmap((void *)handle->regs, MAP_SIZE);
-	if (handle->mem_fd >= 0)
-		close(handle->mem_fd);
+	devmem_unmap(&handle->reg, 1, handle->mem_fd);
 
 	free(handle);
 }

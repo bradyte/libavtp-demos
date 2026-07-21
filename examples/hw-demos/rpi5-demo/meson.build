@@ -4,6 +4,7 @@
 common_src = files('../../common.c')
 
 # Shared modules from hw-demos/common/
+devmem_src = files('../common/devmem.c')
 crf_profile_src = files('../common/crf-profile.c')
 crf_receiver_src = files('../common/crf-receiver.c')
 pi_servo_src = files('../common/pi-servo.c')
@@ -19,6 +20,7 @@ executable(
 	'crf-listener-rpi',
 	'crf-listener-rpi.c',
 	'rp1-clock.c',
+	devmem_src,
 	common_src,
 	crf_profile_src,
 	crf_receiver_src,

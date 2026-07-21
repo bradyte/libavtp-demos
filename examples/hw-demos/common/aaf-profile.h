@@ -69,6 +69,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "avtp.h"
 #include "avtp_aaf.h"
 
 /* The AAF wire format. A talker emits exactly these values; a listener drops

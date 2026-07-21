@@ -27,6 +27,7 @@
 #include "avtp_aaf.h"
 #include "examples/common.h"
 #include "aaf-profile.h"
+#include "alsa-util.h"
 
 /* AAF stream profile — the same definition the listener validates against.
  * Channel count, sample size and PDU layout all derive from it. */
@@ -88,49 +89,6 @@ static error_t parser(int key, char *arg, struct argp_state *state)
 
 static struct argp argp = { options, parser };
 
-static snd_pcm_t *open_alsa_capture(void)
-{
-	snd_pcm_t *pcm;
-	snd_pcm_hw_params_t *params;
-	unsigned int rate = 48000;
-	int res;
-
-	res = snd_pcm_open(&pcm, alsa_dev, SND_PCM_STREAM_CAPTURE, 0);
-	if (res < 0) {
-		fprintf(stderr, "ALSA open failed: %s\n", snd_strerror(res));
-		return NULL;
-	}
-
-	snd_pcm_hw_params_alloca(&params);
-	snd_pcm_hw_params_any(pcm, params);
-
-	snd_pcm_hw_params_set_access(pcm, params,
-				     SND_PCM_ACCESS_RW_INTERLEAVED);
-	snd_pcm_hw_params_set_format(pcm, params, SND_PCM_FORMAT_S32_LE);
-	snd_pcm_hw_params_set_channels(pcm, params, profile.channels);
-	snd_pcm_hw_params_set_rate_near(pcm, params, &rate, 0);
-
-	snd_pcm_uframes_t period = 64;
-	snd_pcm_hw_params_set_period_size_near(pcm, params, &period, 0);
-
-	snd_pcm_uframes_t buffer = period * 8;
-	snd_pcm_hw_params_set_buffer_size_near(pcm, params, &buffer);
-
-	res = snd_pcm_hw_params(pcm, params);
-	if (res < 0) {
-		fprintf(stderr, "ALSA hw_params failed: %s\n",
-			snd_strerror(res));
-		snd_pcm_close(pcm);
-		return NULL;
-	}
-
-	fprintf(stderr, "ALSA capture: %s, S32_LE, %u Hz, %d ch, "
-		"period=%lu, buffer=%lu\n",
-		alsa_dev, rate, profile.channels, period, buffer);
-
-	return pcm;
-}
-
 static uint32_t calc_ptime(void)
 {
 	struct timespec ts;
@@ -180,7 +138,14 @@ int main(int argc, char *argv[])
 	use_alsa = (alsa_dev[0] != '\0');
 
 	if (use_alsa) {
-		pcm = open_alsa_capture();
+		struct alsa_config acfg = {
+			.device = alsa_dev,
+			.stream = SND_PCM_STREAM_CAPTURE,
+			.period = 64,
+			.buffer = 64 * 8,
+		};
+
+		pcm = alsa_open(&acfg, &profile);
 		if (!pcm)
 			return 1;
 	}

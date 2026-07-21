@@ -48,6 +48,7 @@
 #include "avtp_aaf.h"
 #include "examples/common.h"
 #include "aaf-profile.h"
+#include "alsa-util.h"
 
 #include "xsk-util.h"
 
@@ -143,66 +144,6 @@ static error_t parser(int key, char *arg, struct argp_state *state)
 
 static struct argp argp = { options, parser };
 
-static snd_pcm_t *open_alsa_playback(void)
-{
-	snd_pcm_t *pcm;
-	snd_pcm_hw_params_t *params;
-	snd_pcm_sw_params_t *swparams;
-	unsigned int rate = 48000;
-	snd_pcm_uframes_t buffer = BUFFER_FRAMES;
-	snd_pcm_uframes_t period = 1024;
-	snd_pcm_uframes_t start_thr;
-	int res;
-
-	res = snd_pcm_open(&pcm, alsa_dev, SND_PCM_STREAM_PLAYBACK, 0);
-	if (res < 0) {
-		fprintf(stderr, "ALSA open failed: %s\n", snd_strerror(res));
-		return NULL;
-	}
-
-	snd_pcm_hw_params_alloca(&params);
-	snd_pcm_hw_params_any(pcm, params);
-
-	snd_pcm_hw_params_set_access(pcm, params,
-				     SND_PCM_ACCESS_RW_INTERLEAVED);
-	snd_pcm_hw_params_set_format(pcm, params, SND_PCM_FORMAT_S32_LE);
-	snd_pcm_hw_params_set_channels(pcm, params, profile.channels);
-	snd_pcm_hw_params_set_rate_near(pcm, params, &rate, 0);
-	snd_pcm_hw_params_set_period_size_near(pcm, params, &period, 0);
-	snd_pcm_hw_params_set_buffer_size_near(pcm, params, &buffer);
-
-	res = snd_pcm_hw_params(pcm, params);
-	if (res < 0) {
-		fprintf(stderr, "ALSA hw_params failed: %s\n",
-			snd_strerror(res));
-		snd_pcm_close(pcm);
-		return NULL;
-	}
-
-	start_thr = (uint64_t)ptime_offset_us * 48 / 1000;
-	if (start_thr < period)
-		start_thr = period;
-
-	snd_pcm_sw_params_alloca(&swparams);
-	snd_pcm_sw_params_current(pcm, swparams);
-	snd_pcm_sw_params_set_start_threshold(pcm, swparams, start_thr);
-	snd_pcm_sw_params_set_avail_min(pcm, swparams, profile.frames_per_pdu);
-
-	res = snd_pcm_sw_params(pcm, swparams);
-	if (res < 0) {
-		fprintf(stderr, "ALSA sw_params failed: %s\n",
-			snd_strerror(res));
-		snd_pcm_close(pcm);
-		return NULL;
-	}
-
-	fprintf(stderr, "ALSA playback: %s, S32_LE, %u Hz, %d ch, "
-		"period=%lu, buffer=%lu, start_thr=%lu\n",
-		alsa_dev, rate, profile.channels, period, buffer, start_thr);
-
-	return pcm;
-}
-
 /* Report a non-conformant field once per stream. Under AAF_LENIENT the PDU is
  * still played, so without this the mismatch would go unseen. */
 static void report_mismatch(const struct aaf_pdu_info *info,
@@ -220,28 +161,6 @@ static void report_mismatch(const struct aaf_pdu_info *info,
 		status == AAF_PDU_OK ? " (accepted; strict mode would drop it)"
 				     : "");
 }
-static int prefill_silence(snd_pcm_t *pcm, snd_pcm_uframes_t frames)
-{
-	int32_t silence[1024 * 8];	/* 1024 frames, up to 8 channels */
-	snd_pcm_uframes_t chunk_max = sizeof(silence) / sizeof(silence[0]) /
-				      profile.channels;
-
-	memset(silence, 0, sizeof(silence));
-
-	while (frames > 0) {
-		snd_pcm_uframes_t chunk = frames;
-		if (chunk > chunk_max)
-			chunk = chunk_max;
-
-		snd_pcm_sframes_t written = snd_pcm_writei(pcm, silence, chunk);
-		if (written < 0)
-			return written;
-		frames -= written;
-	}
-
-	return 0;
-}
-
 static void process_pdu(struct avtp_stream_pdu *pdu, size_t len,
 			snd_pcm_t *pcm,
 			bool use_alsa, bool *started,
@@ -318,7 +237,7 @@ static void process_pdu(struct avtp_stream_pdu *pdu, size_t len,
 	/* Prefill ALSA on first valid packet */
 	if (!*started) {
 		snd_pcm_uframes_t pf = BUFFER_FRAMES - profile.frames_per_pdu;
-		prefill_silence(pcm, pf);
+		alsa_prefill_silence(pcm, pf, &profile);
 		snd_pcm_nonblock(pcm, 1);
 		*started = true;
 		fprintf(stderr, "Stream started: prefill=%lu frames "
@@ -386,7 +305,24 @@ int main(int argc, char *argv[])
 	use_alsa = (alsa_dev[0] != '\0');
 
 	if (use_alsa) {
-		pcm = open_alsa_playback();
+		/* Hold playback until the ptime offset is buffered, so the
+		 * first write is not consumed before its presentation time.
+		 * Never below one period, or the device starts on a partial. */
+		snd_pcm_uframes_t period = 1024;
+		snd_pcm_uframes_t start_thr =
+			(snd_pcm_uframes_t)((uint64_t)ptime_offset_us *
+					    aaf_profile_sample_rate(&profile) /
+					    1000000);
+		struct alsa_config acfg = {
+			.device = alsa_dev,
+			.stream = SND_PCM_STREAM_PLAYBACK,
+			.period = period,
+			.buffer = BUFFER_FRAMES,
+			.start_threshold = start_thr < period ? period : start_thr,
+			.avail_min = profile.frames_per_pdu,
+		};
+
+		pcm = alsa_open(&acfg, &profile);
 		if (!pcm)
 			return 1;
 	}

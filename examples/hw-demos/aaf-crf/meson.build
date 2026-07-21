@@ -6,6 +6,7 @@ common_src = files('../../common.c')
 # Shared utility modules (from hw-demos/common/)
 phc_utils_src = files('../common/phc-utils.c')
 ptp_extts_src = files('../common/ptp-extts.c')
+devmem_src = files('../common/devmem.c')
 bcm2711_pwm_clock_src = files('../common/bcm2711-pwm-clock.c')
 cs2600_src = files('../common/cs2600.c')
 pi_servo_src = files('../common/pi-servo.c')
@@ -13,6 +14,7 @@ pi_servo_src = files('../common/pi-servo.c')
 # CRF protocol modules (from hw-demos/common/)
 crf_profile_src = files('../common/crf-profile.c')
 aaf_profile_src = files('../common/aaf-profile.c')
+alsa_util_src = files('../common/alsa-util.c')
 crf_receiver_src = files('../common/crf-receiver.c')
 
 inc = [include_directories('../../../include'), include_directories('../../..'), include_directories('../common')]
@@ -39,6 +41,7 @@ executable(
 	crf_profile_src,
 	crf_receiver_src,
 	bcm2711_pwm_clock_src,
+	devmem_src,
 	cs2600_src,
 	phc_utils_src,
 	ptp_extts_src,
@@ -60,6 +63,7 @@ if alsa_dep.found()
 		'aaf-talker-hw.c',
 		common_src,
 		aaf_profile_src,
+		alsa_util_src,
 		include_directories: inc,
 		link_with: avtp_lib,
 		dependencies: [alsa_dep],
@@ -71,6 +75,7 @@ if alsa_dep.found()
 		'aaf-listener-hw.c',
 		common_src,
 		aaf_profile_src,
+		alsa_util_src,
 		xsk_src,
 		include_directories: inc,
 		link_with: avtp_lib,

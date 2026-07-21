@@ -48,6 +48,7 @@
 #include <unistd.h>
 
 #include "bcm2711-pwm-clock.h"
+#include "devmem.h"
 
 #define BCM2711_PERI_BASE	0xFE000000
 #define GPIO_BASE		(BCM2711_PERI_BASE + 0x200000)
@@ -78,7 +79,10 @@
 
 #define PLLD_FREQ_HZ		750000000UL
 
+enum { REG_GPIO, REG_PWM, REG_CLK, REG_COUNT };
+
 struct bcm2711_pwm_clock {
+	struct devmem_region regs[REG_COUNT];
 	volatile unsigned int *gpio_map;
 	volatile unsigned int *pwm_map;
 	volatile unsigned int *clk_map;
@@ -114,9 +118,8 @@ static int get_pwm_channel(unsigned int pin, unsigned int *fsel_value)
 int bcm2711_pwm_clock_init(uint8_t pin, struct bcm2711_pwm_clock **handle)
 {
 	struct bcm2711_pwm_clock *h;
-	int mem_fd;
-	void *gpio_map_base, *pwm_map_base, *clk_map_base;
 	unsigned int fsel_value, fsel_reg, fsel_shift;
+	int mem_fd;
 	int pwm_channel;
 
 	pwm_channel = get_pwm_channel(pin, &fsel_value);
@@ -132,50 +135,22 @@ int bcm2711_pwm_clock_init(uint8_t pin, struct bcm2711_pwm_clock **handle)
 		return -1;
 	}
 
-	mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
-	if (mem_fd < 0) {
-		fprintf(stderr, "Failed to open /dev/mem (need root)\n");
+	h->regs[REG_GPIO] = (struct devmem_region){ GPIO_BASE, BLOCK_SIZE, "GPIO" };
+	h->regs[REG_PWM]  = (struct devmem_region){ PWM_BASE,  BLOCK_SIZE, "PWM" };
+	h->regs[REG_CLK]  = (struct devmem_region){ CLOCK_BASE, BLOCK_SIZE, "clock manager" };
+
+	if (devmem_map(h->regs, REG_COUNT, &mem_fd) < 0) {
 		free(h);
 		return -1;
 	}
 
-	gpio_map_base = mmap(NULL, BLOCK_SIZE, PROT_READ | PROT_WRITE,
-			     MAP_SHARED, mem_fd, GPIO_BASE);
-	if (gpio_map_base == MAP_FAILED) {
-		fprintf(stderr, "GPIO mmap failed\n");
-		close(mem_fd);
-		free(h);
-		return -1;
-	}
-
-	pwm_map_base = mmap(NULL, BLOCK_SIZE, PROT_READ | PROT_WRITE,
-			    MAP_SHARED, mem_fd, PWM_BASE);
-	if (pwm_map_base == MAP_FAILED) {
-		fprintf(stderr, "PWM mmap failed\n");
-		munmap(gpio_map_base, BLOCK_SIZE);
-		close(mem_fd);
-		free(h);
-		return -1;
-	}
-
-	clk_map_base = mmap(NULL, BLOCK_SIZE, PROT_READ | PROT_WRITE,
-			    MAP_SHARED, mem_fd, CLOCK_BASE);
-	if (clk_map_base == MAP_FAILED) {
-		fprintf(stderr, "Clock mmap failed\n");
-		munmap(pwm_map_base, BLOCK_SIZE);
-		munmap(gpio_map_base, BLOCK_SIZE);
-		close(mem_fd);
-		free(h);
-		return -1;
-	}
-
-	h->gpio_map = (volatile unsigned int *)gpio_map_base;
-	h->pwm_map = (volatile unsigned int *)pwm_map_base;
-	h->clk_map = (volatile unsigned int *)clk_map_base;
-	h->gpio_pin = pin;
-	h->pwm_channel = pwm_channel;
+	h->gpio_map = h->regs[REG_GPIO].base;
+	h->pwm_map = h->regs[REG_PWM].base;
+	h->clk_map = h->regs[REG_CLK].base;
 	h->mem_fd = mem_fd;
 
+	h->gpio_pin = pin;
+	h->pwm_channel = pwm_channel;
 	fsel_reg = pin / 10;
 	fsel_shift = (pin % 10) * 3;
 	h->gpio_map[fsel_reg] = (h->gpio_map[fsel_reg] & ~(7 << fsel_shift)) |
@@ -415,17 +390,7 @@ void bcm2711_pwm_clock_cleanup(struct bcm2711_pwm_clock *handle)
 
 	bcm2711_pwm_clock_stop(handle);
 
-	if (handle->gpio_map)
-		munmap((void *)handle->gpio_map, BLOCK_SIZE);
-
-	if (handle->pwm_map)
-		munmap((void *)handle->pwm_map, BLOCK_SIZE);
-
-	if (handle->clk_map)
-		munmap((void *)handle->clk_map, BLOCK_SIZE);
-
-	if (handle->mem_fd >= 0)
-		close(handle->mem_fd);
+	devmem_unmap(handle->regs, REG_COUNT, handle->mem_fd);
 
 	free(handle);
 }
