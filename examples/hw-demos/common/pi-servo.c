@@ -143,9 +143,12 @@ double pi_servo_sample(struct pi_servo *servo,
 		}
 
 		if (llabs(offset) > servo->cfg.slew_thresh_ns) {
-			/* Large-error regime: proportional only. Note this
-			 * leaves drift untouched, so it cannot correct a wrong
-			 * frequency estimate. See the note in pi-servo.h. */
+			/* Large-error regime: proportional gain slews, the
+			 * integrator is held. Running it here winds drift up
+			 * well past target and turns a monotonic 2 s recovery
+			 * into a 28 s ringdown. The cost is that the seed must
+			 * already be within slew_kp * slew_thresh_ns; see the
+			 * note in pi-servo.h. */
 			ppb = servo->cfg.slew_kp * offset + servo->drift;
 			servo->tracking_samples = 0;
 		} else {
@@ -180,15 +183,6 @@ void pi_servo_reset(struct pi_servo *servo)
 {
 	if (servo)
 		servo->count = 0;
-}
-
-void pi_servo_skip_freq_est(struct pi_servo *servo)
-{
-	if (!servo)
-		return;
-
-	servo->drift = 0.0;
-	servo->count = 2;
 }
 
 double pi_servo_get_drift(const struct pi_servo *servo)

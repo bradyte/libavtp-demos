@@ -386,10 +386,16 @@ int main(int argc, char *argv[])
 		goto err_rp1;
 	}
 
-	/* VCO was just reprogrammed — frequency estimation during the transient
-	 * produces a bogus drift. Start at drift=0, let the integrator find it. */
-	pi_servo_skip_freq_est(servo);
-	fprintf(stderr, "Servo: skipped freq est, drift=0, default gains\n");
+	/* The RP1 VCO was reprogrammed during rp1_clock_init(), which polls for
+	 * PLL lock before returning. Frequency acquisition measures the phase
+	 * slope over the next two seconds, so it must not begin until the
+	 * source has settled or it will measure the transient instead.
+	 *
+	 * The seed only has to land within slew_kp * slew_thresh_ns, 1 ppm with
+	 * the default gains, and a two second window resolves a few ppb - so
+	 * there is ample margin, but the window has to start clean. */
+	fprintf(stderr, "Servo: %.1f Hz, acquiring frequency over %.1f s\n",
+		(double)EDGE_FREQ_HZ, servo_cfg.freq_est_interval_s);
 
 	if (csv_log) {
 		fprintf(csv_log, "servo_update,phase_error_ns,ppb,drift,servo_state\n");
