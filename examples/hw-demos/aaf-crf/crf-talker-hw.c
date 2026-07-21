@@ -62,19 +62,13 @@
 #include "avtp.h"
 #include "avtp_crf.h"
 #include "examples/common.h"
+#include "crf-profile.h"
 #include "phc-utils.h"
 
-#define STREAM_ID		0xAABBCCDDEEFF0002
-
-/* Values based on Spec 1722 Table 28 recommendation. */
-#define SAMPLE_RATE		48000
-#define TIMESTAMP_INTERVAL	160
-#define TIMESTAMPS_PER_PKT	6
-
-#define NSEC_PER_SEC		1000000000ULL
-
-#define DATA_LEN		(sizeof(uint64_t) * TIMESTAMPS_PER_PKT)
-#define PDU_SIZE		(sizeof(struct avtp_crf_pdu) + DATA_LEN)
+/* CRF stream profile — the same definition the listener validates against.
+ * Table 28 defaults; the PDU header and the expected edge rate both come
+ * from it. */
+static struct crf_profile profile;
 
 static char ifname[IFNAMSIZ];
 static int verbose;
@@ -159,49 +153,6 @@ static void sig_handler(int signum)
 	running = 0;
 }
 
-static int init_pdu(struct avtp_crf_pdu *pdu)
-{
-	int res;
-
-	res = avtp_crf_pdu_init(pdu);
-	if (res < 0)
-		return -1;
-
-	res = avtp_crf_pdu_set(pdu, AVTP_CRF_FIELD_FS, 0);
-	if (res < 0)
-		return -1;
-
-	res = avtp_crf_pdu_set(pdu, AVTP_CRF_FIELD_TYPE,
-						AVTP_CRF_TYPE_AUDIO_SAMPLE);
-	if (res < 0)
-		return -1;
-
-	res = avtp_crf_pdu_set(pdu, AVTP_CRF_FIELD_STREAM_ID, STREAM_ID);
-	if (res < 0)
-		return -1;
-
-	res = avtp_crf_pdu_set(pdu, AVTP_CRF_FIELD_PULL,
-						AVTP_CRF_PULL_MULT_BY_1);
-	if (res < 0)
-		return -1;
-
-	res = avtp_crf_pdu_set(pdu, AVTP_CRF_FIELD_BASE_FREQ,
-							SAMPLE_RATE);
-	if (res < 0)
-		return -1;
-
-	res = avtp_crf_pdu_set(pdu, AVTP_CRF_FIELD_TIMESTAMP_INTERVAL,
-							TIMESTAMP_INTERVAL);
-	if (res < 0)
-		return -1;
-
-	res = avtp_crf_pdu_set(pdu, AVTP_CRF_FIELD_CRF_DATA_LEN, DATA_LEN);
-	if (res < 0)
-		return -1;
-
-	return 0;
-}
-
 int main(int argc, char *argv[])
 {
 	int sk_fd, res;
@@ -211,7 +162,12 @@ int main(int argc, char *argv[])
 	int ts_idx = 0;
 	uint64_t pkt_count = 0;
 	struct sockaddr_ll sk_addr = {0};
-	struct avtp_crf_pdu *pdu = alloca(PDU_SIZE);
+	struct avtp_crf_pdu *pdu;
+	size_t pdu_size;
+
+	crf_profile_init(&profile);
+	pdu_size = crf_profile_pdu_size(&profile);
+	pdu = alloca(pdu_size);
 
 	argp_parse(&argp, argc, argv, 0, NULL, NULL);
 
@@ -252,7 +208,7 @@ int main(int argc, char *argv[])
 	if (res < 0)
 		goto err_sk;
 
-	res = init_pdu(pdu);
+	res = crf_pdu_init(pdu, &profile);
 	if (res < 0)
 		goto err_sk;
 
@@ -359,22 +315,22 @@ int main(int argc, char *argv[])
 		last_edge_ts = ts;
 		pdu->crf_data[ts_idx++] = htobe64(ts);
 
-		if (ts_idx == TIMESTAMPS_PER_PKT) {
+		if (ts_idx == profile.timestamps_per_pdu) {
 			res = avtp_crf_pdu_set(pdu, AVTP_CRF_FIELD_SEQ_NUM,
 					       seq_num++);
 			if (res < 0)
 				break;
 
-			n = sendto(sk_fd, pdu, PDU_SIZE, 0,
+			n = sendto(sk_fd, pdu, pdu_size, 0,
 				   (struct sockaddr *)&sk_addr, sizeof(sk_addr));
 			if (n < 0) {
 				perror("Failed to send data");
 				break;
 			}
 
-			if (n != PDU_SIZE) {
+			if (n != (ssize_t)pdu_size) {
 				fprintf(stderr, "wrote %zd bytes, expected %zu\n",
-					n, (size_t)PDU_SIZE);
+					n, pdu_size);
 			}
 
 			pkt_count++;
@@ -392,7 +348,8 @@ int main(int argc, char *argv[])
 	}
 
 	fprintf(stderr, "\nStopping — sent %" PRIu64 " packets (%" PRIu64
-		" timestamps)\n", pkt_count, pkt_count * TIMESTAMPS_PER_PKT);
+		" timestamps)\n", pkt_count,
+		pkt_count * profile.timestamps_per_pdu);
 
 err_sk:
 	close(sk_fd);

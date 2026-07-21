@@ -20,6 +20,7 @@ executable(
 	'crf-talker-hw',
 	'crf-talker-hw.c',
 	common_src,
+	crf_profile_src,
 	phc_utils_src,
 	include_directories: inc,
 	link_with: avtp_lib,
