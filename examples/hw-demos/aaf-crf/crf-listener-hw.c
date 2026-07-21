@@ -181,17 +181,48 @@ static int extts_read_nonblock(uint64_t *ts)
 	struct timeval tv = {0};
 	struct ptp_extts_event event;
 
-	FD_ZERO(&fds);
-	FD_SET(ptp_fd, &fds);
-	if (select(ptp_fd + 1, &fds, NULL, NULL, &tv) <= 0)
-		return -1;
-	if (read(ptp_fd, &event, sizeof(event)) != sizeof(event))
-		return -1;
-	if (event.index != 0)
-		return -1;
+	for (;;) {
+		FD_ZERO(&fds);
+		FD_SET(ptp_fd, &fds);
+		if (select(ptp_fd + 1, &fds, NULL, NULL, &tv) <= 0)
+			return -1;
+		if (read(ptp_fd, &event, sizeof(event)) != sizeof(event))
+			return -1;
+		if (event.index == 0)
+			break;
+		/* Event from another channel: skip it and keep looking, the
+		 * way phc_extts_read() does. Reporting it as "no edge" would
+		 * stall synchronisation on a queue holding a foreign event. */
+	}
 
 	*ts = (uint64_t)event.t.sec * NSEC_PER_SEC + event.t.nsec;
 	return 0;
+}
+
+/* Diagnostics for the unsynchronised state.
+ *
+ * A failed synchronize() is silent by nature — there is no edge to report —
+ * so "Waiting for CRF stream..." followed by nothing covers three unrelated
+ * faults: no CRF arriving, CRF arriving but no SDP0 edges, or edges present
+ * but outside tolerance. Accumulate what was actually seen and report it
+ * periodically so the three are distinguishable without a packet capture. */
+static uint64_t sync_ts_seen;
+static uint64_t sync_edges_seen;
+static int64_t sync_last_delta;
+
+static void sync_report(void)
+{
+	if (!sync_edges_seen) {
+		fprintf(stderr, "waiting: %" PRIu64 " CRF timestamps, no SDP0 "
+			"edges — check PWM → CS2600 → SDP0 path\n",
+			sync_ts_seen);
+		return;
+	}
+
+	fprintf(stderr, "waiting: %" PRIu64 " CRF timestamps, %" PRIu64
+		" edges, last delta=%+" PRId64 " us (tolerance ±%" PRId64 " us)\n",
+		sync_ts_seen, sync_edges_seen, sync_last_delta / 1000,
+		edge_tolerance_ns / 1000);
 }
 
 /* Synchronize: discard edges older than crf_ts, keep first one within tolerance */
@@ -199,12 +230,21 @@ static bool synchronize(uint64_t crf_ts)
 {
 	uint64_t edge_ts;
 
+	sync_ts_seen++;
+
 	while (extts_read_nonblock(&edge_ts) == 0) {
 		int64_t delta = (int64_t)(edge_ts - crf_ts);
 
+		sync_edges_seen++;
+		sync_last_delta = delta;
+
 		if (llabs(delta) <= edge_tolerance_ns) {
-			fprintf(stderr, "Synchronized: delta=%+" PRId64 "ns\n",
-				delta);
+			fprintf(stderr, "Synchronized: delta=%+" PRId64 "ns"
+				" (after %" PRIu64 " timestamps, %" PRIu64
+				" edges)\n",
+				delta, sync_ts_seen, sync_edges_seen);
+			sync_ts_seen = 0;
+			sync_edges_seen = 0;
 			return true;
 		}
 
@@ -213,6 +253,10 @@ static bool synchronize(uint64_t crf_ts)
 
 		break;
 	}
+
+	/* One line per second of being stuck. */
+	if (edge_freq_hz && sync_ts_seen % edge_freq_hz == 0)
+		sync_report();
 
 	return false;
 }
@@ -315,6 +359,7 @@ static int pwm_clock_adjust(void *ctx, double ppb)
 int main(int argc, char *argv[])
 {
 	int res, crf_fd;
+	unsigned int idle_sec = 0;
 
 	argp_parse(&argp, argc, argv, 0, NULL, NULL);
 
@@ -470,6 +515,17 @@ int main(int argc, char *argv[])
 			if (running) perror("select");
 			break;
 		}
+
+		if (res == 0) {
+			/* Nothing on the socket at all, as distinct from CRF
+			 * arriving but never syncing to an edge. */
+			idle_sec++;
+			fprintf(stderr, "waiting: no CRF packets for %u s "
+				"(stream 0x%016" PRIx64 " on %s)\n",
+				idle_sec, profile.stream_id, ifname);
+			continue;
+		}
+		idle_sec = 0;
 
 		if (FD_ISSET(crf_fd, &fds))
 			crf_receiver_process(crf_rx);
