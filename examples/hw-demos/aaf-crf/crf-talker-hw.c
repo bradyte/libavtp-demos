@@ -64,6 +64,7 @@
 #include "examples/common.h"
 #include "crf-profile.h"
 #include "phc-utils.h"
+#include "ptp-extts.h"
 
 /* CRF stream profile — the same definition the listener validates against.
  * Table 28 defaults; the PDU header and the expected edge rate both come
@@ -186,15 +187,15 @@ int main(int argc, char *argv[])
 	}
 
 	/* SDP0 (pin 0) → extts, channel 1. GPS PPS uses SDP2. */
-	res = phc_pin_setfunc(ptp_fd, 0, 1, 1);
+	res = ptp_pin_setfunc(ptp_fd, 0, 1, 1);
 	if (res < 0) {
 		fprintf(stderr, "Failed to configure SDP0 pin\n");
 		goto err_phc;
 	}
 
-	phc_extts_disable(ptp_fd, 1);
+	ptp_extts_disable(ptp_fd, 1);
 
-	res = phc_extts_enable(ptp_fd, 1, 1);
+	res = ptp_extts_enable(ptp_fd, 1, 1);
 	if (res < 0) {
 		fprintf(stderr, "Failed to enable extts on channel 1\n");
 		goto err_phc;
@@ -254,13 +255,13 @@ int main(int argc, char *argv[])
 			if (stall_count % REARM_ATTEMPTS_BEFORE_RESET != 0) {
 				/* Try ioctl re-arm first */
 				fprintf(stderr, "  re-arming extts channels\n");
-				phc_extts_disable(ptp_fd, 1);
-				phc_pin_setfunc(ptp_fd, 0, 1, 1);
-				phc_extts_enable(ptp_fd, 1, 1);
+				ptp_extts_disable(ptp_fd, 1);
+				ptp_pin_setfunc(ptp_fd, 0, 1, 1);
+				ptp_extts_enable(ptp_fd, 1, 1);
 
-				phc_extts_disable(ptp_fd, 0);
-				phc_pin_setfunc(ptp_fd, 2, 1, 0);
-				phc_extts_enable(ptp_fd, 0, 1);
+				ptp_extts_disable(ptp_fd, 0);
+				ptp_pin_setfunc(ptp_fd, 2, 1, 0);
+				ptp_extts_enable(ptp_fd, 0, 1);
 			} else {
 				/* Escalate: link bounce to reset igc hardware */
 				fprintf(stderr, "  re-arm failed %d times,"
@@ -276,10 +277,10 @@ int main(int argc, char *argv[])
 					usleep(LINK_RESET_SETTLE_MS * 1000);
 
 					/* Re-configure pins after reset */
-					phc_pin_setfunc(ptp_fd, 0, 1, 1);
-					phc_extts_enable(ptp_fd, 1, 1);
-					phc_pin_setfunc(ptp_fd, 2, 1, 0);
-					phc_extts_enable(ptp_fd, 0, 1);
+					ptp_pin_setfunc(ptp_fd, 0, 1, 1);
+					ptp_extts_enable(ptp_fd, 1, 1);
+					ptp_pin_setfunc(ptp_fd, 2, 1, 0);
+					ptp_extts_enable(ptp_fd, 0, 1);
 
 					fprintf(stderr, "  extts re-armed"
 						" after link reset\n");
@@ -354,7 +355,7 @@ int main(int argc, char *argv[])
 err_sk:
 	close(sk_fd);
 err_extts:
-	phc_extts_disable(ptp_fd, 1);
+	ptp_extts_disable(ptp_fd, 1);
 err_phc:
 	phc_close(ptp_fd);
 	return 0;

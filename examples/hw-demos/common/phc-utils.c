@@ -25,17 +25,11 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/* Linux PTP Hardware Clock (PHC) Utilities
+/* PTP Hardware Clock access.
  *
- * Thin wrappers around Linux kernel PTP/PHC API (linux/ptp_clock.h).
- * Uses standard sysfs + ioctl interfaces that work with any PHC-capable NIC.
- *
- * Implementation notes:
- * - Device discovery via /sys/class/net/<ifname>/device/ptp/
- * - TAI-UTC offset from /sys/class/ptp/ptp<N>/utc_offset
- * - Clock access via posix clock_gettime()/clock_nanosleep()
- * - External timestamp via PTP_EXTTS_REQUEST ioctl
- * - Pin config via PTP_PIN_SETFUNC ioctl (hardware-dependent)
+ * Device discovery via /sys/class/net/<ifname>/device/ptp/, TAI-UTC offset
+ * from /sys/class/ptp/ptp<N>/utc_offset, clock reads through the POSIX clock
+ * calls on a clockid synthesised from the device descriptor.
  */
 
 #include <dirent.h>
@@ -119,6 +113,20 @@ static int read_tai_offset(int ptp_index, int *tai_offset)
 	return 0;
 }
 
+int phc_tai_offset(const char *ifname, int *tai_offset)
+{
+	char ptp_path[64];
+	int ptp_index;
+
+	if (!ifname || !tai_offset)
+		return -1;
+
+	if (find_ptp_device(ifname, ptp_path, sizeof(ptp_path), &ptp_index) < 0)
+		return -1;
+
+	return read_tai_offset(ptp_index, tai_offset);
+}
+
 int phc_open(const char *ifname, int *ptp_fd, clockid_t *clkid, int *tai_offset)
 {
 	char ptp_path[64];
@@ -169,173 +177,4 @@ uint64_t phc_gettime_ns(clockid_t clkid)
 	}
 
 	return (ts.tv_sec * NSEC_PER_SEC) + ts.tv_nsec;
-}
-
-int phc_sleep_until(clockid_t clkid, uint64_t target_ns)
-{
-	struct timespec ts;
-
-	ts.tv_sec = target_ns / NSEC_PER_SEC;
-	ts.tv_nsec = target_ns % NSEC_PER_SEC;
-
-	clock_nanosleep(clkid, TIMER_ABSTIME, &ts, NULL);
-	return 0;
-}
-
-uint64_t timespec_to_ns(const struct timespec *ts)
-{
-	if (!ts)
-		return 0;
-
-	return (ts->tv_sec * NSEC_PER_SEC) + ts->tv_nsec;
-}
-
-void ns_to_timespec(uint64_t ns, struct timespec *ts)
-{
-	if (!ts)
-		return;
-
-	ts->tv_sec = ns / NSEC_PER_SEC;
-	ts->tv_nsec = ns % NSEC_PER_SEC;
-}
-
-int phc_extts_enable(int ptp_fd, unsigned int index, int rising)
-{
-	struct ptp_extts_request extts_req;
-
-	memset(&extts_req, 0, sizeof(extts_req));
-	extts_req.index = index;
-	extts_req.flags = PTP_ENABLE_FEATURE;
-	extts_req.flags |= rising ? PTP_RISING_EDGE : PTP_FALLING_EDGE;
-
-	if (ioctl(ptp_fd, PTP_EXTTS_REQUEST, &extts_req) < 0) {
-		perror("PTP_EXTTS_REQUEST (enable)");
-		return -1;
-	}
-
-	return 0;
-}
-
-int phc_extts_disable(int ptp_fd, unsigned int index)
-{
-	struct ptp_extts_request extts_req;
-
-	memset(&extts_req, 0, sizeof(extts_req));
-	extts_req.index = index;
-	extts_req.flags = 0;
-
-	if (ioctl(ptp_fd, PTP_EXTTS_REQUEST, &extts_req) < 0) {
-		perror("PTP_EXTTS_REQUEST (disable)");
-		return -1;
-	}
-
-	return 0;
-}
-
-int phc_extts_read(int ptp_fd, unsigned int channel, uint64_t *timestamp_ns)
-{
-	struct ptp_extts_event event;
-	ssize_t n;
-
-	for (;;) {
-		n = read(ptp_fd, &event, sizeof(event));
-		if (n < 0) {
-			perror("read extts event");
-			return -1;
-		}
-
-		if (n != sizeof(event)) {
-			fprintf(stderr, "Short read on extts event\n");
-			return -1;
-		}
-
-		if (event.index == channel)
-			break;
-	}
-
-	*timestamp_ns = (uint64_t)event.t.sec * NSEC_PER_SEC + event.t.nsec;
-	return 0;
-}
-
-int phc_pin_setfunc(int ptp_fd, unsigned int pin, unsigned int func, unsigned int chan)
-{
-	struct ptp_pin_desc pin_desc;
-
-	memset(&pin_desc, 0, sizeof(pin_desc));
-	pin_desc.index = pin;
-	pin_desc.func = func;
-	pin_desc.chan = chan;
-
-	if (ioctl(ptp_fd, PTP_PIN_SETFUNC, &pin_desc) < 0) {
-		perror("PTP_PIN_SETFUNC");
-		return -1;
-	}
-
-	return 0;
-}
-
-int phc_perout_oneshot(int ptp_fd, unsigned int channel,
-		       uint64_t start_ns, uint64_t pulse_ns)
-{
-	struct ptp_perout_request req;
-
-	memset(&req, 0, sizeof(req));
-	req.index = channel;
-	req.start.sec = start_ns / NSEC_PER_SEC;
-	req.start.nsec = start_ns % NSEC_PER_SEC;
-
-	/* Try one-shot first (kernel 5.8+) */
-	req.flags = PTP_PEROUT_ONE_SHOT | PTP_PEROUT_DUTY_CYCLE;
-	req.period.sec = 0;
-	req.period.nsec = 0;
-	req.on.sec = pulse_ns / NSEC_PER_SEC;
-	req.on.nsec = pulse_ns % NSEC_PER_SEC;
-
-	if (ioctl(ptp_fd, PTP_PEROUT_REQUEST2, &req) == 0)
-		return 0;
-
-	/* Fallback: periodic with long period, caller must disable after pulse */
-	memset(&req, 0, sizeof(req));
-	req.index = channel;
-	req.flags = PTP_PEROUT_DUTY_CYCLE;
-	req.start.sec = start_ns / NSEC_PER_SEC;
-	req.start.nsec = start_ns % NSEC_PER_SEC;
-	req.period.sec = 1;
-	req.period.nsec = 0;
-	req.on.sec = pulse_ns / NSEC_PER_SEC;
-	req.on.nsec = pulse_ns % NSEC_PER_SEC;
-
-	if (ioctl(ptp_fd, PTP_PEROUT_REQUEST2, &req) == 0)
-		return 1;  /* caller must disable */
-
-	/* Last resort: basic perout without duty cycle (50% duty, 1Hz) */
-	memset(&req, 0, sizeof(req));
-	req.index = channel;
-	req.flags = 0;
-	req.start.sec = start_ns / NSEC_PER_SEC;
-	req.start.nsec = start_ns % NSEC_PER_SEC;
-	req.period.sec = 1;
-	req.period.nsec = 0;
-
-	if (ioctl(ptp_fd, PTP_PEROUT_REQUEST, &req) < 0) {
-		perror("PTP_PEROUT_REQUEST (fallback)");
-		return -1;
-	}
-
-	return 1;  /* caller must disable */
-}
-
-int phc_perout_disable(int ptp_fd, unsigned int channel)
-{
-	struct ptp_perout_request req;
-
-	memset(&req, 0, sizeof(req));
-	req.index = channel;
-
-	if (ioctl(ptp_fd, PTP_PEROUT_REQUEST, &req) < 0) {
-		perror("PTP_PEROUT_REQUEST (disable)");
-		return -1;
-	}
-
-	return 0;
 }

@@ -5,6 +5,7 @@ common_src = files('../../common.c')
 
 # Shared utility modules (from hw-demos/common/)
 phc_utils_src = files('../common/phc-utils.c')
+ptp_extts_src = files('../common/ptp-extts.c')
 bcm2711_pwm_clock_src = files('../common/bcm2711-pwm-clock.c')
 cs2600_src = files('../common/cs2600.c')
 pi_servo_src = files('../common/pi-servo.c')
@@ -23,6 +24,7 @@ executable(
 	common_src,
 	crf_profile_src,
 	phc_utils_src,
+	ptp_extts_src,
 	include_directories: inc,
 	link_with: avtp_lib,
 	dependencies: [mdep],
@@ -39,6 +41,7 @@ executable(
 	bcm2711_pwm_clock_src,
 	cs2600_src,
 	phc_utils_src,
+	ptp_extts_src,
 	pi_servo_src,
 	include_directories: inc,
 	link_with: avtp_lib,

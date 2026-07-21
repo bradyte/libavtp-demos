@@ -73,6 +73,7 @@
 #include "bcm2711-pwm-clock.h"
 #include "cs2600.h"
 #include "phc-utils.h"
+#include "ptp-extts.h"
 
 #define PWM_GPIO		12
 
@@ -176,31 +177,6 @@ static void sig_handler(int signum)
 	running = false;
 }
 
-/* Non-blocking read of one extts event. Returns 0 on success, -1 if nothing ready. */
-static int extts_read_nonblock(uint64_t *ts)
-{
-	fd_set fds;
-	struct timeval tv = {0};
-	struct ptp_extts_event event;
-
-	for (;;) {
-		FD_ZERO(&fds);
-		FD_SET(ptp_fd, &fds);
-		if (select(ptp_fd + 1, &fds, NULL, NULL, &tv) <= 0)
-			return -1;
-		if (read(ptp_fd, &event, sizeof(event)) != sizeof(event))
-			return -1;
-		if (event.index == 0)
-			break;
-		/* Event from another channel: skip it and keep looking, the
-		 * way phc_extts_read() does. Reporting it as "no edge" would
-		 * stall synchronisation on a queue holding a foreign event. */
-	}
-
-	*ts = (uint64_t)event.t.sec * NSEC_PER_SEC + event.t.nsec;
-	return 0;
-}
-
 /* Diagnostics for the unsynchronised state.
  *
  * A failed synchronize() is silent by nature — there is no edge to report —
@@ -234,7 +210,7 @@ static bool synchronize(uint64_t crf_ts)
 
 	sync_ts_seen++;
 
-	while (extts_read_nonblock(&edge_ts) == 0) {
+	while (ptp_extts_read_nonblock(ptp_fd, 0, &edge_ts) == 0) {
 		int64_t delta = (int64_t)(edge_ts - crf_ts);
 
 		sync_edges_seen++;
@@ -283,7 +259,7 @@ static void on_crf_timestamps(uint64_t *timestamps, int count, uint8_t seq,
 		uint64_t edge_ts;
 		int res;
 
-		res = phc_extts_read(ptp_fd, 0, &edge_ts);
+		res = ptp_extts_read(ptp_fd, 0, &edge_ts);
 		if (res < 0) {
 			edge_miss_count++;
 			continue;
@@ -345,7 +321,7 @@ static void on_crf_drop(uint8_t expected, uint8_t actual, void *ctx)
 	unsigned int stale = gap * profile.timestamps_per_pdu;
 	for (unsigned int i = 0; i < stale; i++) {
 		uint64_t discard;
-		if (phc_extts_read(ptp_fd, 0, &discard) < 0)
+		if (ptp_extts_read(ptp_fd, 0, &discard) < 0)
 			break;
 	}
 
@@ -466,13 +442,13 @@ int main(int argc, char *argv[])
 	fprintf(stderr, "CS2600: Locked\n");
 
 	/* Configure SDP0 for edge capture (CS2600 AUX_OUT → SDP0) */
-	phc_extts_disable(ptp_fd, 0);
-	res = phc_pin_setfunc(ptp_fd, 0, 1, 0);
+	ptp_extts_disable(ptp_fd, 0);
+	res = ptp_pin_setfunc(ptp_fd, 0, 1, 0);
 	if (res < 0) {
 		fprintf(stderr, "Failed to configure SDP0\n");
 		goto err_cs2600;
 	}
-	res = phc_extts_enable(ptp_fd, 0, 1);
+	res = ptp_extts_enable(ptp_fd, 0, 1);
 	if (res < 0) {
 		fprintf(stderr, "Failed to enable SDP0 capture\n");
 		goto err_cs2600;
@@ -545,12 +521,12 @@ int main(int argc, char *argv[])
 	if (csv_log)
 		fclose(csv_log);
 
-	phc_extts_disable(ptp_fd, 0);
+	ptp_extts_disable(ptp_fd, 0);
 	crf_receiver_destroy(crf_rx);
 err_servo:
 	pi_servo_destroy(servo);
 err_extts:
-	phc_extts_disable(ptp_fd, 0);
+	ptp_extts_disable(ptp_fd, 0);
 err_cs2600:
 	cs2600_close(&cs2600_dev);
 err_pwm:

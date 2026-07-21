@@ -4,6 +4,12 @@
  * Tests i210 SDP external timestamp capture of GPIO PWM signal.
  * Wire GPIO12 (PWM output) to i210 SDP0 input physically.
  *
+ * Build:
+ *   gcc -O2 -o sdp-capture-test sdp-capture-test.c \
+ *       ../../common/phc-utils.c ../../common/ptp-extts.c \
+ *       ../../common/bcm2711-pwm-clock.c \
+ *       -I../../common -I../../../.. -I../../../../include -lm
+ *
  * Usage: sdp-capture-test -i <ifname> -g <gpio-pin>
  */
 
@@ -14,8 +20,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "../bcm2711-pwm-clock.h"
-#include "../phc-utils.h"
+#include "bcm2711-pwm-clock.h"
+#include "phc-utils.h"
+#include "ptp-extts.h"
 
 static char ifname[16] = "eth1";
 static int gpio_pin = -1;
@@ -92,7 +99,7 @@ int main(int argc, char *argv[])
 	fprintf(stderr, "Make sure GPIO %d is wired to i226 SDP0 input!\n\n", gpio_pin);
 
 	fprintf(stderr, "Configuring SDP0 pin for external timestamp input...\n");
-	res = phc_pin_setfunc(ptp_fd, 0, 1, 0);
+	res = ptp_pin_setfunc(ptp_fd, 0, 1, 0);
 	if (res < 0) {
 		fprintf(stderr, "Failed to configure SDP0 pin\n");
 		bcm2711_pwm_clock_cleanup(gpio_handle);
@@ -100,7 +107,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	res = phc_extts_enable(ptp_fd, 0, 1);
+	res = ptp_extts_enable(ptp_fd, 0, 1);
 	if (res < 0) {
 		fprintf(stderr, "Failed to enable external timestamps on SDP0\n");
 		fprintf(stderr, "Check that GPIO is wired to SDP0 input\n");
@@ -118,7 +125,7 @@ int main(int argc, char *argv[])
 		int64_t interval;
 		double freq;
 
-		res = phc_extts_read(ptp_fd, 0, &ts);
+		res = ptp_extts_read(ptp_fd, 0, &ts);
 		if (res < 0) {
 			if (running)
 				fprintf(stderr, "Error reading timestamp\n");
@@ -143,7 +150,7 @@ int main(int argc, char *argv[])
 	fprintf(stderr, "\nStopping...\n");
 	fprintf(stderr, "Captured %" PRIu64 " timestamps\n", pkt_count);
 
-	phc_extts_disable(ptp_fd, 0);
+	ptp_extts_disable(ptp_fd, 0);
 	bcm2711_pwm_clock_cleanup(gpio_handle);
 	phc_close(ptp_fd);
 

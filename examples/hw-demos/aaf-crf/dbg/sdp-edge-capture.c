@@ -6,8 +6,10 @@
  * Validates that i226 EXTTS can keep up with 2kHz capture rate.
  *
  * Build:
- *   gcc -O2 -o sdp-edge-capture sdp-edge-capture.c ../phc-utils.c \
- *       ../bcm2711-pwm-clock.c -I../.. -I../../include -lm
+ *   gcc -O2 -o sdp-edge-capture sdp-edge-capture.c \
+ *       ../../common/phc-utils.c ../../common/ptp-extts.c \
+ *       ../../common/bcm2711-pwm-clock.c \
+ *       -I../../common -I../../../.. -I../../../../include -lm
  *
  * Run:
  *   sudo taskset -c 3 ./sdp-edge-capture -i eth1 -o fpga_edges.csv -d 120
@@ -22,8 +24,9 @@
 #include <string.h>
 #include <time.h>
 
-#include "../phc-utils.h"
-#include "../bcm2711-pwm-clock.h"
+#include "phc-utils.h"
+#include "ptp-extts.h"
+#include "bcm2711-pwm-clock.h"
 
 #define PWM_GPIO		12
 #define CAPTURE_FREQ_HZ		2000
@@ -119,15 +122,15 @@ int main(int argc, char *argv[])
 	fprintf(stderr, "PWM: GPIO%d at %d Hz\n", PWM_GPIO, CAPTURE_FREQ_HZ);
 
 	/* SDP0 (pin 0) → extts, channel 0 */
-	res = phc_pin_setfunc(ptp_fd, 0, 1, 0);
+	res = ptp_pin_setfunc(ptp_fd, 0, 1, 0);
 	if (res < 0) {
 		fprintf(stderr, "Failed to configure SDP0 pin\n");
 		goto err;
 	}
 
-	phc_extts_disable(ptp_fd, 0);
+	ptp_extts_disable(ptp_fd, 0);
 
-	res = phc_extts_enable(ptp_fd, 0, 1);
+	res = ptp_extts_enable(ptp_fd, 0, 1);
 	if (res < 0) {
 		fprintf(stderr, "Failed to enable extts on channel 0\n");
 		goto err;
@@ -137,7 +140,7 @@ int main(int argc, char *argv[])
 	fprintf(stderr, "Waiting for first edge...\n");
 
 	/* Capture first edge to start the clock */
-	res = phc_extts_read(ptp_fd, 0, &timestamps[0]);
+	res = ptp_extts_read(ptp_fd, 0, &timestamps[0]);
 	if (res < 0) {
 		fprintf(stderr, "No edges received\n");
 		goto cleanup;
@@ -150,7 +153,7 @@ int main(int argc, char *argv[])
 		duration_sec * CAPTURE_FREQ_HZ);
 
 	while (running && count < MAX_EDGES) {
-		res = phc_extts_read(ptp_fd, 0, &timestamps[count]);
+		res = ptp_extts_read(ptp_fd, 0, &timestamps[count]);
 		if (res < 0)
 			break;
 
@@ -169,7 +172,7 @@ int main(int argc, char *argv[])
 	fprintf(stderr, "Captured %" PRIu64 " edges\n\n", count);
 
 cleanup:
-	phc_extts_disable(ptp_fd, 0);
+	ptp_extts_disable(ptp_fd, 0);
 	bcm2711_pwm_clock_cleanup(pwm_clock);
 	phc_close(ptp_fd);
 
