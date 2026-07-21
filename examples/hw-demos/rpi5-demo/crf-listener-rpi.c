@@ -42,12 +42,9 @@
 
 #include "crf-profile.h"
 #include "crf-receiver.h"
-#include "pi-hw.h"
+#include "pi-servo.h"
 #include "clock-adjust.h"
 #include "rp1-clock.h"
-
-#define SERVO_MAX_PPB		2000000.0
-#define SERVO_STEP_THRESH	100000000.0
 
 #define EDGE_FREQ_HZ		300
 
@@ -64,6 +61,7 @@ static char gpiochip_path[64] = "/dev/gpiochip0";
 static unsigned int gpio_line = 17;
 
 static struct pi_servo *servo;
+static struct pi_servo_config servo_cfg;
 static struct crf_receiver *crf_rx;
 static int gpio_edge_fd = -1;
 
@@ -381,7 +379,8 @@ int main(int argc, char *argv[])
 	clock_adjust = rp1_clock_adjust_fn;
 	clock_adjust_ctx = rp1_clk;
 
-	servo = pi_servo_create(SERVO_MAX_PPB, SERVO_STEP_THRESH);
+	pi_servo_config_init(&servo_cfg);
+	servo = pi_servo_create(&servo_cfg);
 	if (!servo) {
 		fprintf(stderr, "Failed to create servo\n");
 		goto err_rp1;

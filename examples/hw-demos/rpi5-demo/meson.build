@@ -6,7 +6,7 @@ common_src = files('../../common.c')
 # Shared modules from hw-demos/common/
 crf_profile_src = files('../common/crf-profile.c')
 crf_receiver_src = files('../common/crf-receiver.c')
-pi_servo_src = files('../common/pi-hw.c')
+pi_servo_src = files('../common/pi-servo.c')
 
 inc = [
 	include_directories('../common'),

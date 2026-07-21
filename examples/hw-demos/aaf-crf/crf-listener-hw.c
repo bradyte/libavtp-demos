@@ -68,14 +68,11 @@
 
 #include "crf-profile.h"
 #include "crf-receiver.h"
-#include "pi-hw.h"
+#include "pi-servo.h"
 #include "clock-adjust.h"
 #include "bcm2711-pwm-clock.h"
 #include "cs2600.h"
 #include "phc-utils.h"
-
-#define SERVO_MAX_PPB		2000000.0
-#define SERVO_STEP_THRESH	100000000.0
 
 #define PWM_GPIO		12
 
@@ -96,6 +93,7 @@ static uint8_t crf_macaddr[ETH_ALEN];
 static struct bcm2711_pwm_clock *pwm_clock;
 static struct cs2600 cs2600_dev;
 static struct pi_servo *servo;
+static struct pi_servo_config servo_cfg;
 static struct crf_receiver *crf_rx;
 static int ptp_fd = -1;
 static clockid_t phc_clk;
@@ -480,7 +478,8 @@ int main(int argc, char *argv[])
 		goto err_cs2600;
 	}
 
-	servo = pi_servo_create(SERVO_MAX_PPB, SERVO_STEP_THRESH);
+	pi_servo_config_init(&servo_cfg);
+	servo = pi_servo_create(&servo_cfg);
 	if (!servo) {
 		fprintf(stderr, "Failed to create servo\n");
 		goto err_extts;

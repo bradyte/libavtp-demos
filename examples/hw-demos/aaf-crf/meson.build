@@ -7,7 +7,7 @@ common_src = files('../../common.c')
 phc_utils_src = files('../common/phc-utils.c')
 bcm2711_pwm_clock_src = files('../common/bcm2711-pwm-clock.c')
 cs2600_src = files('../common/cs2600.c')
-pi_servo_src = files('../common/pi-hw.c')
+pi_servo_src = files('../common/pi-servo.c')
 
 # CRF protocol modules (from hw-demos/common/)
 crf_profile_src = files('../common/crf-profile.c')
