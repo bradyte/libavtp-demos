@@ -79,6 +79,10 @@
 
 #define PWM_GPIO		12
 
+/* I2S master clock the CS2600 synthesises from the recovered PWM edge rate.
+ * 512 x 48 kHz; the multiplication ratio follows from the stream profile. */
+#define CS2600_MCLK_HZ		24576000.0
+
 /* CRF stream profile. The PWM output rate and the servo's phase window are
  * both derived from it, so the edge rate the hardware generates always
  * matches the stream the receiver accepts. */
@@ -449,8 +453,11 @@ int main(int argc, char *argv[])
 		goto err_cs2600;
 	}
 
-	fprintf(stderr, "CS2600: Configuring 300Hz → 24.576MHz...\n");
-	res = cs2600_init_mult_300hz(&cs2600_dev);
+	fprintf(stderr, "CS2600: Configuring %u Hz → %.3f MHz (ratio %.1f)...\n",
+		edge_freq_hz, CS2600_MCLK_HZ / 1e6,
+		CS2600_MCLK_HZ / crf_profile_edge_hz(&profile));
+	res = cs2600_init_mult(&cs2600_dev, CS2600_MCLK_HZ,
+			       crf_profile_edge_hz(&profile));
 	if (res == -2) {
 		fprintf(stderr, "CS2600: Frequency lock timeout\n");
 		goto err_cs2600;
