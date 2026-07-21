@@ -209,3 +209,6 @@ executable(
 	link_with: avtp_lib,
 	build_by_default: false,
 )
+
+subdir('examples/hw-demos/aaf-crf')
+subdir('examples/hw-demos/rpi5-demo')

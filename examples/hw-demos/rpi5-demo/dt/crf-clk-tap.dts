@@ -1,0 +1,61 @@
+/*
+ * crf-clk-tap.dts — self-contained CRF servo tap for Raspberry Pi 5
+ *
+ * Clock chain:  pll_audio_core -> pll_audio -> clk_i2s -> clk_gp0 -> GPIO4
+ * Capture:      GPIO4 --(jumper)--> GPIO17 -> GPIO chardev edge detect
+ *
+ * VCO = 50 MHz × 31.45728 = 1,572,864,000 Hz = 24.576 MHz × 64
+ * clk_i2s = VCO / 64 = 24.576 MHz (512×fs, standard DAC MCLK)
+ * clk_gp0 = 24.576 MHz / 81920 = 300.000 Hz exactly (1 edge per CRF
+ * timestamp at timestamp_interval = 160, fs = 48 kHz).
+ *
+ * GPIO17 edge capture is handled by the GPIO chardev (/dev/gpiochipN) in
+ * userspace — no pps-gpio driver needed. The chardev provides a FIFO of
+ * CLOCK_REALTIME timestamps for each rising edge.
+ *
+ * Build:
+ *   dtc -@ -I dts -O dtb -o crf-clk-tap.dtbo crf-clk-tap.dts
+ *   sudo cp crf-clk-tap.dtbo /boot/firmware/overlays/
+ *   /boot/firmware/config.txt:  dtoverlay=crf-clk-tap
+ *
+ * VERIFY on your kernel before flashing:
+ *   1. Node labels: `dtc -I fs -O dts /proc/device-tree 2>/dev/null | \
+ *      grep -E 'rp1_clocks|rp1_gpio' ` — adjust &labels if they differ.
+ *   2. Pinmux function string: `pinctrl funcs 4` — replace "gpclk0" below
+ *      with whatever the RP1 pinctrl driver actually names that alt.
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "raspberrypi,5-model-b";
+
+	/* ---- clock parenting + rates ----
+	 * Clock IDs from dt-bindings/clock/rp1.h:
+	 *   RP1_PLL_AUDIO_CORE=1, RP1_PLL_AUDIO=4, RP1_CLK_I2S=21, RP1_CLK_GP0=33 */
+	fragment@0 {
+		target = <&rp1_clocks>;
+		__overlay__ {
+			assigned-clocks        = <&rp1_clocks 21>, /* CLK_I2S */
+			                         <&rp1_clocks 33>; /* CLK_GP0 */
+			assigned-clock-parents = <&rp1_clocks 4>,  /* PLL_AUDIO */
+			                         <&rp1_clocks 21>; /* CLK_I2S */
+		};
+	};
+
+	/* ---- pinmux: GPCLK0 output on GPIO4 ---- */
+	fragment@1 {
+		target = <&rp1_gpio>;
+		__overlay__ {
+			pinctrl-names = "default";
+			pinctrl-0 = <&gpclk0_tap_pin>;
+
+			gpclk0_tap_pin: gpclk0_tap_pin {
+				function = "gpclk0";	/* verify: pinctrl funcs 4 */
+				pins = "gpio4";
+				drive-strength = <8>;
+			};
+		};
+	};
+};

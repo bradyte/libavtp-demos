@@ -1,0 +1,54 @@
+#!/usr/bin/python
+#########################################################################
+#  Copyright (c) 2024 Cirrus Logic, Inc and
+#  Cirrus Logic International Semiconductor Ltd.  All rights reserved.
+#
+#  This software as well as any related documentation is furnished under
+#  license and may only be used or copied in accordance with the terms of the
+#  license.  The information in this file is furnished for informational use
+#  only, is subject to change without notice, and should not be construed as
+#  a commitment by Cirrus Logic.  Cirrus Logic assumes no responsibility or
+#  liability for any errors or inaccuracies that may appear in this document
+#  or any software that may be provided in association with this document.
+#
+#  Except as permitted by such license, no part of this document may be
+#  reproduced, stored in a retrieval system, or transmitted in any form or by
+#  any means without the express written consent of Cirrus Logic.
+#
+#  Warning
+#    This software is specifically written for Cirrus Logic devices.
+#    It may not be used with other devices.
+#
+#########################################################################
+## @file   CS2600_Smart_Multiplier_Holdover_Mode.py
+## @brief  SoundClear Studio script to enable Smart Multiplier Holdover Mode mode.
+## Start-up without CLK_IN in Synthesizer Mode, then after CLK_IN (1kHz) is applied mode switches to Multiplier Mode and keeps the same CLK_OUT frequency.
+#########################################################################
+"""**************************************************************************************
+* No CLK_IN at start-up, then apply 1kHz CLK_IN 
+* REF_CLK must be 12MHz
+* CLK_OUT = 24.576MHz
+**************************************************************************************"""
+
+from studiolink.StudioLink import StudioLink
+device_CS2600 = StudioLink.get_device_by_type("CS2600")
+
+###Software Reset 
+device_CS2600.writeRegisterByName("SW_RESET", 0x005A) # SW_RST = Software reset
+
+### S_RATIO_SEL
+device_CS2600.writeRegisterByName("PLL_CFG1", 0x0880) # # S_RATIO_SEL = Ratio 2
+
+###Ratio 1
+device_CS2600.writeRegisterByName("RATIO1_1", 0x0600) # RATIO1 = 24576
+
+###Ratio 2
+device_CS2600.writeRegisterByName("RATIO2_1", 0x0020) # 
+device_CS2600.writeRegisterByName("RATIO2_2", 0xC49C) # RATIO 2 = 2.048
+
+###REF_CLK_IN divider and REF_CLK Source selection
+device_CS2600.writeRegisterByName("PLL_CFG3", 0x0012) # REF_CLK_IN_DIV = Divide by 1, SYSCLK_SRC = REF_CLK_IN
+
+###PLL Enable
+device_CS2600.writeRegisterByName("PLL_CFG1", 0x0980) # PLL_EN1 = Enabled, S_RATIO_SEL = Ratio 2
+device_CS2600.writeRegisterByName("PLL_CFG2", 0x0108) # PLL_EN2 = Enabled
