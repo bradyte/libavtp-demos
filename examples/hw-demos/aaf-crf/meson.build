@@ -11,6 +11,7 @@ pi_servo_src = files('../common/pi-hw.c')
 
 # CRF protocol modules (from hw-demos/common/)
 crf_profile_src = files('../common/crf-profile.c')
+aaf_profile_src = files('../common/aaf-profile.c')
 crf_receiver_src = files('../common/crf-receiver.c')
 
 inc = [include_directories('../../../include'), include_directories('../../..'), include_directories('../common')]
@@ -55,6 +56,7 @@ if alsa_dep.found()
 		'aaf-talker-hw',
 		'aaf-talker-hw.c',
 		common_src,
+		aaf_profile_src,
 		include_directories: inc,
 		link_with: avtp_lib,
 		dependencies: [alsa_dep],
@@ -65,6 +67,7 @@ if alsa_dep.found()
 		'aaf-listener-hw',
 		'aaf-listener-hw.c',
 		common_src,
+		aaf_profile_src,
 		xsk_src,
 		include_directories: inc,
 		link_with: avtp_lib,

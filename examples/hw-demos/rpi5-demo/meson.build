@@ -29,16 +29,7 @@ executable(
 	build_by_default: false,
 )
 
-# AAF Listener — presentation-time gating via CLOCK_REALTIME
-alsa_dep = dependency('alsa', required: false)
-if alsa_dep.found()
-	executable(
-		'aaf-listener-rpi',
-		'aaf-listener-rpi.c',
-		common_src,
-		include_directories: inc,
-		link_with: avtp_lib,
-		dependencies: [alsa_dep],
-		build_by_default: false,
-	)
-endif
+# The AAF listener is platform-neutral and lives in aaf-crf/. AF_XDP is a
+# runtime option there (-q); omit it and it uses AF_PACKET, which is what a
+# stock Raspberry Pi 5 needs — its kernel has no CONFIG_XDP_SOCKETS. One
+# binary serves both boards, so there is no separate target here.

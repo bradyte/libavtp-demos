@@ -1,17 +1,29 @@
 /*
  * AAF Listener with ALSA playback and presentation-time gating.
  *
- * Receives IEEE 1722 AAF packets and buffers them in a depacketizer
- * queue until their presentation time arrives, then writes to ALSA.
- * This enables multiple listeners to present data simultaneously
- * regardless of network position.
+ * Receives IEEE 1722 AAF packets and holds each one until its presentation
+ * time arrives, then writes to ALSA. Listeners at different points on the
+ * network therefore present the same sample at the same instant.
  *
- * Pattern: recv → enqueue with ptime → present when now >= ptime
+ * Pattern: recv → gate on ptime → present when now >= ptime
  * The 8kHz packet arrival cadence drives presentation timing.
  *
+ * Presentation time is compared against CLOCK_REALTIME, which is expected to
+ * be PTP-synchronised via phc2sys.
+ *
+ * Platform-neutral: no custom hardware, any PTP-capable NIC. Receive uses
+ * AF_PACKET by default; -q selects AF_XDP on a given NIC queue where the
+ * kernel supports it. A stock Raspberry Pi 5 image is built without
+ * CONFIG_XDP_SOCKETS, so omit -q there and it uses AF_PACKET.
+ *
  * Usage:
- *   sudo chrt -f 80 taskset -c 3 ./aaf-listener-hw \
- *       -i eth1 -d 91:E0:F0:00:FE:01 -t 500 -a hw:1,0
+ *   CM4 + i226, AF_XDP on queue 0:
+ *     sudo chrt -f 80 taskset -c 3 ./aaf-listener-hw \
+ *         -i eth1 -d 91:E0:F0:00:FE:01 -t 500 -a hw:1,0 -q 0
+ *
+ *   Stock Raspberry Pi 5, AF_PACKET:
+ *     sudo chrt -f 80 taskset -c 3 ./aaf-listener-hw \
+ *         -i eth0 -d 91:E0:F0:00:FE:01 -t 500 -a hw:0,0
  */
 
 #include <alsa/asoundlib.h>
@@ -35,15 +47,15 @@
 #include "avtp.h"
 #include "avtp_aaf.h"
 #include "examples/common.h"
+#include "aaf-profile.h"
 
 #include "xsk-util.h"
 
-#define STREAM_ID		0xAABBCCDDEEFF0002
-#define NUM_CHANNELS		2
-#define SAMPLE_SIZE		4	/* S32_BE = 4 bytes */
-#define FRAMES_PER_PDU		6
-#define DATA_LEN		(SAMPLE_SIZE * NUM_CHANNELS * FRAMES_PER_PDU)
-#define PDU_SIZE		(sizeof(struct avtp_stream_pdu) + DATA_LEN)
+/* AAF stream profile — the same definition the talker encodes. ALSA setup
+ * and the PDU layout both derive from it. */
+static struct aaf_profile profile;
+static enum aaf_strictness aaf_mode = AAF_LENIENT;
+static bool reported_mismatch;
 #define NSEC_PER_SEC		1000000000ULL
 #define NSEC_PER_USEC		1000ULL
 #define BUFFER_FRAMES		4096
@@ -154,7 +166,7 @@ static snd_pcm_t *open_alsa_playback(void)
 	snd_pcm_hw_params_set_access(pcm, params,
 				     SND_PCM_ACCESS_RW_INTERLEAVED);
 	snd_pcm_hw_params_set_format(pcm, params, SND_PCM_FORMAT_S32_LE);
-	snd_pcm_hw_params_set_channels(pcm, params, NUM_CHANNELS);
+	snd_pcm_hw_params_set_channels(pcm, params, profile.channels);
 	snd_pcm_hw_params_set_rate_near(pcm, params, &rate, 0);
 	snd_pcm_hw_params_set_period_size_near(pcm, params, &period, 0);
 	snd_pcm_hw_params_set_buffer_size_near(pcm, params, &buffer);
@@ -174,7 +186,7 @@ static snd_pcm_t *open_alsa_playback(void)
 	snd_pcm_sw_params_alloca(&swparams);
 	snd_pcm_sw_params_current(pcm, swparams);
 	snd_pcm_sw_params_set_start_threshold(pcm, swparams, start_thr);
-	snd_pcm_sw_params_set_avail_min(pcm, swparams, FRAMES_PER_PDU);
+	snd_pcm_sw_params_set_avail_min(pcm, swparams, profile.frames_per_pdu);
 
 	res = snd_pcm_sw_params(pcm, swparams);
 	if (res < 0) {
@@ -186,78 +198,40 @@ static snd_pcm_t *open_alsa_playback(void)
 
 	fprintf(stderr, "ALSA playback: %s, S32_LE, %u Hz, %d ch, "
 		"period=%lu, buffer=%lu, start_thr=%lu\n",
-		alsa_dev, rate, NUM_CHANNELS, period, buffer, start_thr);
+		alsa_dev, rate, profile.channels, period, buffer, start_thr);
 
 	return pcm;
 }
 
-static bool is_valid_packet(struct avtp_stream_pdu *pdu)
+/* Report a non-conformant field once per stream. Under AAF_LENIENT the PDU is
+ * still played, so without this the mismatch would go unseen. */
+static void report_mismatch(const struct aaf_pdu_info *info,
+			    enum aaf_pdu_status status)
 {
-	struct avtp_common_pdu *common = (struct avtp_common_pdu *)pdu;
-	uint64_t val64;
-	uint32_t val32;
-	int res;
+	if (!info->bad_field || reported_mismatch)
+		return;
 
-	res = avtp_pdu_get(common, AVTP_FIELD_SUBTYPE, &val32);
-	if (res < 0)
-		return false;
-	if (val32 != AVTP_SUBTYPE_AAF)
-		return false;
-
-	res = avtp_pdu_get(common, AVTP_FIELD_VERSION, &val32);
-	if (res < 0)
-		return false;
-	if (val32 != 0)
-		return false;
-
-	res = avtp_aaf_pdu_get(pdu, AVTP_AAF_FIELD_TV, &val64);
-	if (res < 0)
-		return false;
-	if (val64 != 1)
-		return false;
-
-	res = avtp_aaf_pdu_get(pdu, AVTP_AAF_FIELD_STREAM_ID, &val64);
-	if (res < 0)
-		return false;
-	if (val64 != STREAM_ID)
-		return false;
-
-	res = avtp_aaf_pdu_get(pdu, AVTP_AAF_FIELD_FORMAT, &val64);
-	if (res < 0)
-		return false;
-	if (val64 != AVTP_AAF_FORMAT_INT_32BIT)
-		return false;
-
-	res = avtp_aaf_pdu_get(pdu, AVTP_AAF_FIELD_NSR, &val64);
-	if (res < 0)
-		return false;
-	if (val64 != AVTP_AAF_PCM_NSR_48KHZ)
-		return false;
-
-	res = avtp_aaf_pdu_get(pdu, AVTP_AAF_FIELD_CHAN_PER_FRAME, &val64);
-	if (res < 0)
-		return false;
-	if (val64 != NUM_CHANNELS)
-		return false;
-
-	res = avtp_aaf_pdu_get(pdu, AVTP_AAF_FIELD_STREAM_DATA_LEN, &val64);
-	if (res < 0)
-		return false;
-	if (val64 != DATA_LEN)
-		return false;
-
-	return true;
+	reported_mismatch = true;
+	fprintf(stderr,
+		"AAF: %s field '%s' = %" PRIu64 ", profile expects %" PRIu64
+		"%s\n",
+		status == AAF_PDU_OK ? "non-conformant" : "rejected",
+		info->bad_field, info->bad_got, info->bad_want,
+		status == AAF_PDU_OK ? " (accepted; strict mode would drop it)"
+				     : "");
 }
-
 static int prefill_silence(snd_pcm_t *pcm, snd_pcm_uframes_t frames)
 {
-	int32_t silence[1024 * NUM_CHANNELS];
+	int32_t silence[1024 * 8];	/* 1024 frames, up to 8 channels */
+	snd_pcm_uframes_t chunk_max = sizeof(silence) / sizeof(silence[0]) /
+				      profile.channels;
+
 	memset(silence, 0, sizeof(silence));
 
 	while (frames > 0) {
 		snd_pcm_uframes_t chunk = frames;
-		if (chunk > 1024)
-			chunk = 1024;
+		if (chunk > chunk_max)
+			chunk = chunk_max;
 
 		snd_pcm_sframes_t written = snd_pcm_writei(pcm, silence, chunk);
 		if (written < 0)
@@ -268,40 +242,39 @@ static int prefill_silence(snd_pcm_t *pcm, snd_pcm_uframes_t frames)
 	return 0;
 }
 
-static void process_pdu(struct avtp_stream_pdu *pdu, snd_pcm_t *pcm,
+static void process_pdu(struct avtp_stream_pdu *pdu, size_t len,
+			snd_pcm_t *pcm,
 			bool use_alsa, bool *started,
 			uint64_t *pkt_count, uint64_t *drop_count,
 			uint64_t *late_count, uint64_t *last_log_count)
 {
-	uint64_t avtp_time;
+	struct aaf_pdu_info info;
+	enum aaf_pdu_status status;
 	struct timespec tspec;
+	uint8_t seq;
 	int res;
 
-	if (!is_valid_packet(pdu)) {
+	status = aaf_pdu_parse(pdu, len, &profile, aaf_mode, &info);
+	if (status != AAF_PDU_OK) {
 		(*drop_count)++;
+		report_mismatch(&info, status);
 		return;
 	}
+	report_mismatch(&info, status);
 
-	/* Seq tracking */
-	uint64_t seq_val;
-	avtp_aaf_pdu_get(pdu, AVTP_AAF_FIELD_SEQ_NUM, &seq_val);
-	uint8_t seq = (uint8_t)seq_val;
+	seq = info.seq_num;
 
 	if (seq_valid && seq != expected_seq) {
 		uint8_t gap = (uint8_t)(seq - expected_seq);
 		if (logfp)
 			fprintf(logfp, "Seq gap: expected %u got %u "
 				"(%u frames)\n", expected_seq, seq,
-				(unsigned)(gap * FRAMES_PER_PDU));
+				(unsigned)(gap * profile.frames_per_pdu));
 	}
 	expected_seq = seq + 1;
 	seq_valid = true;
 
-	res = avtp_aaf_pdu_get(pdu, AVTP_AAF_FIELD_TIMESTAMP, &avtp_time);
-	if (res < 0)
-		return;
-
-	res = get_presentation_time(avtp_time, &tspec);
+	res = get_presentation_time(info.timestamp, &tspec);
 	if (res < 0)
 		return;
 
@@ -344,7 +317,7 @@ static void process_pdu(struct avtp_stream_pdu *pdu, snd_pcm_t *pcm,
 
 	/* Prefill ALSA on first valid packet */
 	if (!*started) {
-		snd_pcm_uframes_t pf = BUFFER_FRAMES - FRAMES_PER_PDU;
+		snd_pcm_uframes_t pf = BUFFER_FRAMES - profile.frames_per_pdu;
 		prefill_silence(pcm, pf);
 		snd_pcm_nonblock(pcm, 1);
 		*started = true;
@@ -353,13 +326,14 @@ static void process_pdu(struct avtp_stream_pdu *pdu, snd_pcm_t *pcm,
 	}
 
 	/* Depacketize and write directly to ALSA */
-	int32_t pcm_buf[FRAMES_PER_PDU * NUM_CHANNELS];
-	int32_t *src = (int32_t *)pdu->avtp_payload;
-	for (int i = 0; i < FRAMES_PER_PDU * NUM_CHANNELS; i++)
+	size_t samples = info.payload_len / sizeof(int32_t);
+	int32_t pcm_buf[samples];
+	const int32_t *src = info.payload;
+	for (size_t i = 0; i < samples; i++)
 		pcm_buf[i] = ntohl(src[i]);
 
 	snd_pcm_sframes_t written;
-	written = snd_pcm_writei(pcm, pcm_buf, FRAMES_PER_PDU);
+	written = snd_pcm_writei(pcm, pcm_buf, profile.frames_per_pdu);
 	if (written < 0) {
 		if (written != -EAGAIN) {
 			fprintf(stderr, "ALSA underrun, recovering\n");
@@ -383,7 +357,8 @@ int main(int argc, char *argv[])
 {
 	int sk_fd = -1, res;
 	snd_pcm_t *pcm = NULL;
-	struct avtp_stream_pdu *pdu = alloca(PDU_SIZE);
+	struct avtp_stream_pdu *pdu;
+	size_t pdu_size;
 	bool started = false;
 	uint64_t pkt_count = 0;
 	uint64_t drop_count = 0;
@@ -392,6 +367,10 @@ int main(int argc, char *argv[])
 	bool use_alsa;
 	bool use_xdp = false;
 	struct xsk_ctx *xsk = NULL;
+
+	aaf_profile_init(&profile);
+	pdu_size = aaf_profile_pdu_size(&profile);
+	pdu = alloca(pdu_size);
 
 	argp_parse(&argp, argc, argv, 0, NULL, NULL);
 
@@ -488,7 +467,7 @@ int main(int argc, char *argv[])
 				const uint8_t *frame =
 					xsk_ctx_rx_packet(xsk, i, &len);
 
-				if (len < sizeof(struct ethhdr) + PDU_SIZE)
+				if (len < sizeof(struct ethhdr) + pdu_size)
 					continue;
 
 				struct ethhdr *eth = (struct ethhdr *)frame;
@@ -499,7 +478,8 @@ int main(int argc, char *argv[])
 					(struct avtp_stream_pdu *)
 					(frame + sizeof(struct ethhdr));
 
-				process_pdu(rpdu, pcm, use_alsa, &started,
+				process_pdu(rpdu, pdu_size, pcm,
+					    use_alsa, &started,
 					    &pkt_count, &drop_count,
 					    &late_count, &last_log_count);
 			}
@@ -507,11 +487,11 @@ int main(int argc, char *argv[])
 			continue;
 		}
 		/* AF_PACKET path */
-		ssize_t n = recv(sk_fd, pdu, PDU_SIZE, 0);
-		if (n < 0 || n != PDU_SIZE)
+		ssize_t n = recv(sk_fd, pdu, pdu_size, 0);
+		if (n < 0 || (size_t)n != pdu_size)
 			continue;
 
-		process_pdu(pdu, pcm, use_alsa, &started,
+		process_pdu(pdu, pdu_size, pcm, use_alsa, &started,
 			    &pkt_count, &drop_count,
 			    &late_count, &last_log_count);
 	}

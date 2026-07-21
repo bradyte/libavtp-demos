@@ -26,13 +26,12 @@
 #include "avtp.h"
 #include "avtp_aaf.h"
 #include "examples/common.h"
+#include "aaf-profile.h"
 
-#define STREAM_ID		0xAABBCCDDEEFF0002
-#define NUM_CHANNELS		2
-#define SAMPLE_SIZE		4	/* S32_BE = 4 bytes */
-#define FRAMES_PER_PDU		6
-#define DATA_LEN		(SAMPLE_SIZE * NUM_CHANNELS * FRAMES_PER_PDU)
-#define PDU_SIZE		(sizeof(struct avtp_stream_pdu) + DATA_LEN)
+/* AAF stream profile — the same definition the listener validates against.
+ * Channel count, sample size and PDU layout all derive from it. */
+static struct aaf_profile profile;
+
 #define NSEC_PER_SEC		1000000000ULL
 #define NSEC_PER_USEC		1000ULL
 
@@ -89,53 +88,6 @@ static error_t parser(int key, char *arg, struct argp_state *state)
 
 static struct argp argp = { options, parser };
 
-static int init_pdu(struct avtp_stream_pdu *pdu)
-{
-	int res;
-
-	res = avtp_aaf_pdu_init(pdu);
-	if (res < 0)
-		return -1;
-
-	res = avtp_aaf_pdu_set(pdu, AVTP_AAF_FIELD_TV, 1);
-	if (res < 0)
-		return -1;
-
-	res = avtp_aaf_pdu_set(pdu, AVTP_AAF_FIELD_STREAM_ID, STREAM_ID);
-	if (res < 0)
-		return -1;
-
-	res = avtp_aaf_pdu_set(pdu, AVTP_AAF_FIELD_FORMAT,
-			       AVTP_AAF_FORMAT_INT_32BIT);
-	if (res < 0)
-		return -1;
-
-	res = avtp_aaf_pdu_set(pdu, AVTP_AAF_FIELD_NSR,
-			       AVTP_AAF_PCM_NSR_48KHZ);
-	if (res < 0)
-		return -1;
-
-	res = avtp_aaf_pdu_set(pdu, AVTP_AAF_FIELD_CHAN_PER_FRAME,
-			       NUM_CHANNELS);
-	if (res < 0)
-		return -1;
-
-	res = avtp_aaf_pdu_set(pdu, AVTP_AAF_FIELD_BIT_DEPTH, 32);
-	if (res < 0)
-		return -1;
-
-	res = avtp_aaf_pdu_set(pdu, AVTP_AAF_FIELD_STREAM_DATA_LEN, DATA_LEN);
-	if (res < 0)
-		return -1;
-
-	res = avtp_aaf_pdu_set(pdu, AVTP_AAF_FIELD_SP,
-			       AVTP_AAF_PCM_SP_NORMAL);
-	if (res < 0)
-		return -1;
-
-	return 0;
-}
-
 static snd_pcm_t *open_alsa_capture(void)
 {
 	snd_pcm_t *pcm;
@@ -155,7 +107,7 @@ static snd_pcm_t *open_alsa_capture(void)
 	snd_pcm_hw_params_set_access(pcm, params,
 				     SND_PCM_ACCESS_RW_INTERLEAVED);
 	snd_pcm_hw_params_set_format(pcm, params, SND_PCM_FORMAT_S32_LE);
-	snd_pcm_hw_params_set_channels(pcm, params, NUM_CHANNELS);
+	snd_pcm_hw_params_set_channels(pcm, params, profile.channels);
 	snd_pcm_hw_params_set_rate_near(pcm, params, &rate, 0);
 
 	snd_pcm_uframes_t period = 64;
@@ -174,7 +126,7 @@ static snd_pcm_t *open_alsa_capture(void)
 
 	fprintf(stderr, "ALSA capture: %s, S32_LE, %u Hz, %d ch, "
 		"period=%lu, buffer=%lu\n",
-		alsa_dev, rate, NUM_CHANNELS, period, buffer);
+		alsa_dev, rate, profile.channels, period, buffer);
 
 	return pcm;
 }
@@ -191,12 +143,16 @@ static uint32_t calc_ptime(void)
 	return ptime % (1ULL << 32);
 }
 
-static void generate_test_pattern(int32_t *buf, int pkt_num)
+/* Ramp: every channel of a frame carries the same running sample counter,
+ * so a listener can spot dropped or reordered frames by inspection. */
+static void generate_test_pattern(int32_t *buf, int pkt_num,
+				  unsigned int frames, unsigned int channels)
 {
-	for (int i = 0; i < FRAMES_PER_PDU; i++) {
-		int32_t val = pkt_num * FRAMES_PER_PDU + i + 1;
-		buf[i * NUM_CHANNELS + 0] = val;	/* L = sample counter */
-		buf[i * NUM_CHANNELS + 1] = val;	/* R = same */
+	for (unsigned int i = 0; i < frames; i++) {
+		int32_t val = pkt_num * frames + i + 1;
+
+		for (unsigned int c = 0; c < channels; c++)
+			buf[i * channels + c] = val;
 	}
 }
 
@@ -204,11 +160,20 @@ int main(int argc, char *argv[])
 {
 	int fd, res;
 	struct sockaddr_ll sk_addr;
-	struct avtp_stream_pdu *pdu = alloca(PDU_SIZE);
+	struct avtp_stream_pdu *pdu;
 	snd_pcm_t *pcm = NULL;
 	uint8_t seq_num = 0;
-	int32_t buf[FRAMES_PER_PDU * NUM_CHANNELS];
+	int32_t *buf;
+	size_t pdu_size, samples;
+	unsigned int frames_per_pdu;
 	bool use_alsa;
+
+	aaf_profile_init(&profile);
+	pdu_size = aaf_profile_pdu_size(&profile);
+	samples = aaf_profile_samples_per_pdu(&profile);
+	frames_per_pdu = profile.frames_per_pdu;
+	pdu = alloca(pdu_size);
+	buf = alloca(samples * sizeof(*buf));
 
 	argp_parse(&argp, argc, argv, 0, NULL, NULL);
 
@@ -228,17 +193,17 @@ int main(int argc, char *argv[])
 	if (res < 0)
 		goto err;
 
-	res = init_pdu(pdu);
+	res = aaf_pdu_init(pdu, &profile);
 	if (res < 0)
 		goto err;
 
 	if (use_alsa)
 		fprintf(stderr, "Streaming: ptime_offset=%u us, %d frames/pdu\n",
-			ptime_offset_us, FRAMES_PER_PDU);
+			ptime_offset_us, frames_per_pdu);
 	else
 		fprintf(stderr, "Test pattern: %d packets, %d frames/pdu, "
 			"ptime_offset=%u us\n",
-			num_pkts ? num_pkts : -1, FRAMES_PER_PDU,
+			num_pkts ? num_pkts : -1, frames_per_pdu,
 			ptime_offset_us);
 
 	for (int pkt = 0; num_pkts == 0 || pkt < num_pkts; pkt++) {
@@ -248,7 +213,7 @@ int main(int argc, char *argv[])
 		if (use_alsa) {
 			snd_pcm_sframes_t frames;
 
-			frames = snd_pcm_readi(pcm, buf, FRAMES_PER_PDU);
+			frames = snd_pcm_readi(pcm, buf, frames_per_pdu);
 			if (frames < 0) {
 				frames = snd_pcm_recover(pcm, frames, 0);
 				if (frames < 0) {
@@ -258,16 +223,17 @@ int main(int argc, char *argv[])
 				}
 				continue;
 			}
-			if (frames != FRAMES_PER_PDU)
+			if (frames != (snd_pcm_sframes_t)frames_per_pdu)
 				continue;
 		} else {
-			generate_test_pattern(buf, pkt);
+			generate_test_pattern(buf, pkt, frames_per_pdu,
+					      profile.channels);
 		}
 
 		/* Byteswap S32_LE → S32_BE for AAF wire format */
 		{
 			int32_t *dst = (int32_t *)pdu->avtp_payload;
-			for (int i = 0; i < FRAMES_PER_PDU * NUM_CHANNELS; i++)
+			for (size_t i = 0; i < samples; i++)
 				dst[i] = htonl(buf[i]);
 		}
 
@@ -283,7 +249,7 @@ int main(int argc, char *argv[])
 		if (res < 0)
 			goto err;
 
-		n = sendto(fd, pdu, PDU_SIZE, 0,
+		n = sendto(fd, pdu, pdu_size, 0,
 			   (struct sockaddr *)&sk_addr, sizeof(sk_addr));
 		if (n < 0) {
 			perror("sendto failed");
