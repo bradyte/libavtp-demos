@@ -9,6 +9,7 @@ ptp_extts_src = files('../common/ptp-extts.c')
 devmem_src = files('../common/devmem.c')
 bcm2711_pwm_clock_src = files('../common/bcm2711-pwm-clock.c')
 cs2600_src = files('../common/cs2600.c')
+media_clock_src = files('../common/media-clock.c', '../common/mc-bcm2711.c')
 pi_servo_src = files('../common/pi-servo.c')
 
 # CRF protocol modules (from hw-demos/common/)
@@ -43,6 +44,7 @@ executable(
 	bcm2711_pwm_clock_src,
 	devmem_src,
 	cs2600_src,
+	media_clock_src,
 	phc_utils_src,
 	ptp_extts_src,
 	pi_servo_src,

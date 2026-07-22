@@ -26,18 +26,18 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/* CRF Listener — Hardware Clock Recovery
+/* CRF Listener — media clock recovery
  *
- * Receives IEEE 1722 CRF timestamps over TSN and recovers the 48kHz media
- * clock using a 1:1 PLL servo at 300Hz.
+ * Receives IEEE 1722 CRF timestamps over TSN and recovers the media clock
+ * with a 1:1 PLL servo: one feedback edge per CRF timestamp, phase error
+ * between them driving a PI loop that steers the local clock.
  *
- * Signal path:
- *   BCM2711 PWM (300Hz, GPIO12) → CS2600 CLK_IN
- *   CS2600 AUX_OUT (buffered 300Hz) → i226 SDP0 (feedback)
- *   CS2600 CLK_OUT (24.576MHz) → I2S MCLK
+ * Rates come from the CRF stream profile, not from constants here. A 48 kHz
+ * base frequency with a timestamp interval of 160 gives 300 edges/s.
  *
- * Each CRF timestamp has exactly one feedback edge from the CS2600.
- * The PI servo adjusts the PWM fractional divider to lock phase.
+ * Everything platform-specific — where edges are captured and how the clock
+ * is steered — is behind media-clock.h. See mc-bcm2711.c for the CM4 with an
+ * i226 and a CS2600. Select with -B, or let it autodetect.
  *
  * Build:
  *   ninja -C build examples/hw-demos/aaf-crf/crf-listener-hw
@@ -68,18 +68,8 @@
 
 #include "crf-profile.h"
 #include "crf-receiver.h"
+#include "media-clock.h"
 #include "pi-servo.h"
-#include "clock-adjust.h"
-#include "bcm2711-pwm-clock.h"
-#include "cs2600.h"
-#include "phc-utils.h"
-#include "ptp-extts.h"
-
-#define PWM_GPIO		12
-
-/* I2S master clock the CS2600 synthesises from the recovered PWM edge rate.
- * 512 x 48 kHz; the multiplication ratio follows from the stream profile. */
-#define CS2600_MCLK_HZ		24576000.0
 
 /* CRF stream profile. The PWM output rate and the servo's phase window are
  * both derived from it, so the edge rate the hardware generates always
@@ -91,16 +81,14 @@ static int64_t edge_tolerance_ns;	/* half an edge period */
 static char ifname[IFNAMSIZ];
 static uint8_t crf_macaddr[ETH_ALEN];
 
-static struct bcm2711_pwm_clock *pwm_clock;
-static struct cs2600 cs2600_dev;
+static const struct media_clock_ops *mc_ops;
+static struct media_clock *mc;
 static struct pi_servo *servo;
 static struct pi_servo_config servo_cfg;
 static struct crf_receiver *crf_rx;
-static int ptp_fd = -1;
-static clockid_t phc_clk;
 
-static clock_adjust_fn clock_adjust;
-static void *clock_adjust_ctx;
+/* Wait up to two edge periods before calling an edge missed. */
+static int edge_timeout_ms;
 
 static volatile bool running = true;
 
@@ -113,8 +101,9 @@ static uint64_t pkt_dropped;
 static uint64_t edge_miss_count;
 static uint64_t last_edge_ts;
 
-/* I2C device for CS2600 */
-static char i2c_dev[64] = "/dev/i2c-1";
+/* Backend device path, meaning depends on the backend */
+static char device_path[64];
+static char backend_name[16];
 
 /* CSV logging */
 static FILE *csv_log;
@@ -125,7 +114,8 @@ static bool verbose;
 static struct argp_option options[] = {
 	{"dst-addr", 'd', "MACADDR", 0, "Stream Destination MAC address"},
 	{"ifname", 'i', "IFNAME", 0, "Network Interface"},
-	{"i2c", 'b', "PATH", 0, "I2C device for CS2600 (default /dev/i2c-1)"},
+	{"i2c", 'b', "PATH", 0, "Backend device path (CM4: I2C bus for CS2600)"},
+	{"backend", 'B', "NAME", 0, "Media clock backend (default: autodetect)"},
 	{"log", 'l', "FILE", 0, "CSV log file"},
 	{"freeze", 'f', "N", 0, "Freeze DCO after N servo updates"},
 	{"verbose", 'v', 0, 0, "Print per-edge EXTTS jitter to stdout"},
@@ -150,7 +140,10 @@ static error_t parser(int key, char *arg, struct argp_state *state)
 		strncpy(ifname, arg, sizeof(ifname) - 1);
 		break;
 	case 'b':
-		strncpy(i2c_dev, arg, sizeof(i2c_dev) - 1);
+		strncpy(device_path, arg, sizeof(device_path) - 1);
+		break;
+	case 'B':
+		strncpy(backend_name, arg, sizeof(backend_name) - 1);
 		break;
 	case 'l':
 		csv_log = fopen(arg, "w");
@@ -181,8 +174,8 @@ static void sig_handler(int signum)
  *
  * A failed synchronize() is silent by nature — there is no edge to report —
  * so "Waiting for CRF stream..." followed by nothing covers three unrelated
- * faults: no CRF arriving, CRF arriving but no SDP0 edges, or edges present
- * but outside tolerance. Accumulate what was actually seen and report it
+ * faults: no CRF arriving, CRF arriving but no feedback edges, or edges
+ * present but outside tolerance. Accumulate what was actually seen and report it
  * periodically so the three are distinguishable without a packet capture. */
 static uint64_t sync_ts_seen;
 static uint64_t sync_edges_seen;
@@ -191,9 +184,9 @@ static int64_t sync_last_delta;
 static void sync_report(void)
 {
 	if (!sync_edges_seen) {
-		fprintf(stderr, "waiting: %" PRIu64 " CRF timestamps, no SDP0 "
-			"edges — check PWM → CS2600 → SDP0 path\n",
-			sync_ts_seen);
+		fprintf(stderr, "waiting: %" PRIu64 " CRF timestamps, no "
+			"feedback edges — check the %s clock path\n",
+			sync_ts_seen, mc_ops->name);
 		return;
 	}
 
@@ -210,7 +203,7 @@ static bool synchronize(uint64_t crf_ts)
 
 	sync_ts_seen++;
 
-	while (ptp_extts_read_nonblock(ptp_fd, 0, &edge_ts) == 0) {
+	while (mc_ops->edge_read(mc, &edge_ts, 0) == 0) {
 		int64_t delta = (int64_t)(edge_ts - crf_ts);
 
 		sync_edges_seen++;
@@ -243,7 +236,7 @@ static void on_crf_timestamps(uint64_t *timestamps, int count, uint8_t seq,
 			      void *ctx)
 {
 	if (verbose) {
-		uint64_t now = phc_gettime_ns(phc_clk);
+		uint64_t now = mc_ops->now_tai_ns(mc);
 		int64_t transit = (int64_t)(now - timestamps[count - 1]);
 		fprintf(stdout, "transit_us=%" PRId64 "\n", transit / 1000);
 	}
@@ -259,7 +252,7 @@ static void on_crf_timestamps(uint64_t *timestamps, int count, uint8_t seq,
 		uint64_t edge_ts;
 		int res;
 
-		res = ptp_extts_read(ptp_fd, 0, &edge_ts);
+		res = mc_ops->edge_read(mc, &edge_ts, edge_timeout_ms);
 		if (res < 0) {
 			edge_miss_count++;
 			continue;
@@ -283,7 +276,7 @@ static void on_crf_timestamps(uint64_t *timestamps, int count, uint8_t seq,
 		double ppb = pi_servo_sample(servo, phase_error, edge_ts, &state);
 
 		if (state != SERVO_UNLOCKED && !dco_frozen)
-			clock_adjust(clock_adjust_ctx, ppb);
+			mc_ops->adjust(mc, ppb);
 
 		servo_update_count++;
 
@@ -304,7 +297,8 @@ static void on_crf_timestamps(uint64_t *timestamps, int count, uint8_t seq,
 			fprintf(csv_log, "%" PRIu64 ",%" PRId64 ",%.3f,%.3f,%d,%u\n",
 				servo_update_count, phase_error, ppb,
 				pi_servo_get_drift(servo), state,
-				bcm2711_pwm_clock_get_divf(pwm_clock));
+				mc_ops->actuator_code ?
+					mc_ops->actuator_code(mc) : 0u);
 			fflush(csv_log);
 		}
 	}
@@ -321,17 +315,12 @@ static void on_crf_drop(uint8_t expected, uint8_t actual, void *ctx)
 	unsigned int stale = gap * profile.timestamps_per_pdu;
 	for (unsigned int i = 0; i < stale; i++) {
 		uint64_t discard;
-		if (ptp_extts_read(ptp_fd, 0, &discard) < 0)
+		if (mc_ops->edge_read(mc, &discard, 0) < 0)
 			break;
 	}
 
 	fprintf(stderr, "WARNING: Dropped %d pkt(s) (seq %d→%d)\n",
 		gap, expected, actual);
-}
-
-static int pwm_clock_adjust(void *ctx, double ppb)
-{
-	return bcm2711_pwm_clock_adjust_freq((struct bcm2711_pwm_clock *)ctx, ppb);
 }
 
 int main(int argc, char *argv[])
@@ -363,106 +352,39 @@ int main(int argc, char *argv[])
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
 
-	res = phc_open(ifname, &ptp_fd, &phc_clk, NULL);
-	if (res < 0) {
-		fprintf(stderr, "Failed to open PHC for %s\n", ifname);
+	mc_ops = media_clock_select(backend_name[0] ? backend_name : NULL);
+	if (!mc_ops)
 		return 1;
-	}
 
-	fprintf(stderr, "CRF Listener — Hardware Clock Recovery (1:1 PLL, %u Hz)\n",
-		edge_freq_hz);
-	fprintf(stderr, "  GPIO %d: %u Hz → CS2600 CLK_IN → AUX_OUT → i226 SDP0\n",
-		PWM_GPIO, edge_freq_hz);
-	fprintf(stderr, "  Servo: %u Hz (1:1 CRF-to-edge, tol ±%" PRId64 " us)\n\n",
+	fprintf(stderr, "CRF Listener — Hardware Clock Recovery (%s, %u Hz)\n",
+		mc_ops->name, edge_freq_hz);
+	fprintf(stderr, "  Servo: %u Hz (1:1 CRF-to-edge, tol ±%" PRId64 " us)\n",
 		edge_freq_hz, edge_tolerance_ns / 1000);
 
-	res = bcm2711_pwm_clock_init(PWM_GPIO, &pwm_clock);
-	if (res < 0) {
-		fprintf(stderr, "Failed to init PWM\n");
-		goto err_phc;
-	}
+	struct media_clock_config mc_cfg = {
+		.ifname = ifname,
+		.edge_hz = crf_profile_edge_hz(&profile),
+		.device = device_path[0] ? device_path : NULL,
+	};
 
-	clock_adjust = pwm_clock_adjust;
-	clock_adjust_ctx = pwm_clock;
+	if (mc_ops->open(&mc, &mc_cfg) < 0)
+		return 1;
 
-	res = bcm2711_pwm_clock_prepare(pwm_clock, edge_freq_hz);
-	if (res < 0) {
-		fprintf(stderr, "Failed to prepare PWM\n");
-		goto err_pwm;
-	}
-
-	{
-		uint64_t now = phc_gettime_ns(phc_clk);
-		uint64_t target = ((now / NSEC_PER_SEC) + 1) * NSEC_PER_SEC;
-
-		fprintf(stderr, "PWM: Waiting for PTP second %lu to enable...\n",
-			(unsigned long)(target / NSEC_PER_SEC));
-
-		uint64_t wait_ns = (target - 1000000) - now;
-		struct timespec dur = {
-			.tv_sec = wait_ns / NSEC_PER_SEC,
-			.tv_nsec = wait_ns % NSEC_PER_SEC,
-		};
-		clock_nanosleep(CLOCK_MONOTONIC, 0, &dur, NULL);
-		while (phc_gettime_ns(phc_clk) < target)
-			;
-
-		bcm2711_pwm_clock_enable(pwm_clock);
-
-		uint64_t actual = phc_gettime_ns(phc_clk);
-		fprintf(stderr, "PWM: Enabled at PTP +%ldns from target\n",
-			(long)(actual - target));
-	}
-
-	/* Initialize CS2600 jitter cleaner: 300Hz → 24.576MHz */
-	res = cs2600_open(i2c_dev, CS2600_I2C_ADDR, &cs2600_dev);
-	if (res < 0) {
-		fprintf(stderr, "Failed to open CS2600 on %s\n", i2c_dev);
-		goto err_pwm;
-	}
-
-	res = cs2600_check_id(&cs2600_dev);
-	if (res < 0) {
-		fprintf(stderr, "CS2600 not found (bad device ID)\n");
-		goto err_cs2600;
-	}
-
-	fprintf(stderr, "CS2600: Configuring %u Hz → %.3f MHz (ratio %.1f)...\n",
-		edge_freq_hz, CS2600_MCLK_HZ / 1e6,
-		CS2600_MCLK_HZ / crf_profile_edge_hz(&profile));
-	res = cs2600_init_mult(&cs2600_dev, CS2600_MCLK_HZ,
-			       crf_profile_edge_hz(&profile));
-	if (res == -2) {
-		fprintf(stderr, "CS2600: Frequency lock timeout\n");
-		goto err_cs2600;
-	} else if (res < 0) {
-		fprintf(stderr, "CS2600: Init failed\n");
-		goto err_cs2600;
-	}
-	fprintf(stderr, "CS2600: Locked\n");
-
-	/* Configure SDP0 for edge capture (CS2600 AUX_OUT → SDP0) */
-	ptp_extts_disable(ptp_fd, 0);
-	res = ptp_pin_setfunc(ptp_fd, 0, 1, 0);
-	if (res < 0) {
-		fprintf(stderr, "Failed to configure SDP0\n");
-		goto err_cs2600;
-	}
-	res = ptp_extts_enable(ptp_fd, 0, 1);
-	if (res < 0) {
-		fprintf(stderr, "Failed to enable SDP0 capture\n");
-		goto err_cs2600;
-	}
+	/* Two edge periods: long enough that ordinary jitter is not a miss,
+	 * short enough that a dead feedback path is reported rather than
+	 * blocking the receive loop forever. */
+	edge_timeout_ms = (int)(2000.0 / crf_profile_edge_hz(&profile)) + 1;
 
 	pi_servo_config_init(&servo_cfg);
 	servo = pi_servo_create(&servo_cfg);
 	if (!servo) {
 		fprintf(stderr, "Failed to create servo\n");
-		goto err_extts;
+		res = 1;
+		goto out;
 	}
 
 	if (csv_log) {
-		fprintf(csv_log, "servo_update,phase_error_ns,ppb,drift,servo_state,divf\n");
+		fprintf(csv_log, "servo_update,phase_error_ns,ppb,drift,servo_state,actuator\n");
 		fflush(csv_log);
 	}
 
@@ -478,7 +400,8 @@ int main(int argc, char *argv[])
 	crf_rx = crf_receiver_create(&rx_cfg);
 	if (!crf_rx) {
 		fprintf(stderr, "Failed to create CRF receiver\n");
-		goto err_servo;
+		res = 1;
+		goto out;
 	}
 
 	crf_fd = crf_receiver_fd(crf_rx);
@@ -492,13 +415,13 @@ int main(int argc, char *argv[])
 		FD_ZERO(&fds);
 		FD_SET(crf_fd, &fds);
 
-		res = select(crf_fd + 1, &fds, NULL, NULL, &tv);
-		if (res < 0) {
-			if (running) perror("select");
+		if (select(crf_fd + 1, &fds, NULL, NULL, &tv) < 0) {
+			if (running)
+				perror("select");
 			break;
 		}
 
-		if (res == 0) {
+		if (!FD_ISSET(crf_fd, &fds)) {
 			/* Nothing on the socket at all, as distinct from CRF
 			 * arriving but never syncing to an edge. */
 			idle_sec++;
@@ -508,9 +431,7 @@ int main(int argc, char *argv[])
 			continue;
 		}
 		idle_sec = 0;
-
-		if (FD_ISSET(crf_fd, &fds))
-			crf_receiver_process(crf_rx);
+		crf_receiver_process(crf_rx);
 	}
 
 	fprintf(stderr, "\nStopping...\n");
@@ -518,20 +439,12 @@ int main(int argc, char *argv[])
 		" pkts, missed %" PRIu64 " edges)\n",
 		servo_update_count, pkt_dropped, edge_miss_count);
 
+	res = 0;
+out:
 	if (csv_log)
 		fclose(csv_log);
-
-	ptp_extts_disable(ptp_fd, 0);
 	crf_receiver_destroy(crf_rx);
-err_servo:
 	pi_servo_destroy(servo);
-err_extts:
-	ptp_extts_disable(ptp_fd, 0);
-err_cs2600:
-	cs2600_close(&cs2600_dev);
-err_pwm:
-	bcm2711_pwm_clock_cleanup(pwm_clock);
-err_phc:
-	phc_close(ptp_fd);
-	return 0;
+	mc_ops->close(mc);
+	return res;
 }
