@@ -7,9 +7,9 @@
  *
  * Build:
  *   gcc -O2 -o sdp-edge-capture sdp-edge-capture.c \
- *       ../../common/phc-utils.c ../../common/ptp-extts.c \
- *       ../../common/bcm2711-pwm-clock.c \
- *       -I../../common -I../../../.. -I../../../../include -lm
+ *       ../common/phc-utils.c ../common/ptp-extts.c \
+ *       ../common/bcm2711-pwm-clock.c \
+ *       -I../common -I../../../.. -I../../../../include -lm
  *
  * Run:
  *   sudo taskset -c 3 ./sdp-edge-capture -i eth1 -o fpga_edges.csv -d 120

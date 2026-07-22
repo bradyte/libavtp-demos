@@ -4,10 +4,13 @@
  * Clock chain:  pll_audio_core -> pll_audio -> clk_i2s -> clk_gp0 -> GPIO4
  * Capture:      GPIO4 --(jumper)--> GPIO17 -> GPIO chardev edge detect
  *
- * VCO = 50 MHz × 31.45728 = 1,572,864,000 Hz = 24.576 MHz × 64
- * clk_i2s = VCO / 64 = 24.576 MHz (512×fs, standard DAC MCLK)
- * clk_gp0 = 24.576 MHz / 81920 = 300.000 Hz exactly (1 edge per CRF
- * timestamp at timestamp_interval = 160, fs = 48 kHz).
+ * VCO = 50 MHz × 31.45728 = 1,572,864,000 Hz = 12.288 MHz × 128
+ * clk_i2s = 12.288 MHz (256×fs, standard DAC MCLK). rp1-clock.c reads the
+ * PLL_PRIM post-divider and computes CLK_I2S_DIV to land on that, so any
+ * power-of-two post-divider works out exactly.
+ * clk_gp0 = clk_i2s / 40960 = 300.000 Hz, one edge per CRF timestamp at
+ * timestamp_interval = 160, fs = 48 kHz. The divider is not fixed here:
+ * rp1_clock_enable() derives it from the rate the CRF profile implies.
  *
  * GPIO17 edge capture is handled by the GPIO chardev (/dev/gpiochipN) in
  * userspace — no pps-gpio driver needed. The chardev provides a FIFO of

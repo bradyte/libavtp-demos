@@ -248,10 +248,8 @@ static int bcm2711_edge_read(struct media_clock *mc, uint64_t *tai_ns,
 	struct bcm2711_clock *c = to_bcm2711(mc);
 
 	/* PHC timestamps are already TAI, so no conversion. */
-	if (timeout_ms == 0)
-		return ptp_extts_read_nonblock(c->ptp_fd, SDP_CHANNEL, tai_ns);
-
-	return ptp_extts_read(c->ptp_fd, SDP_CHANNEL, tai_ns);
+	return ptp_extts_read_timeout(c->ptp_fd, SDP_CHANNEL, tai_ns,
+				      timeout_ms);
 }
 
 static int bcm2711_adjust(struct media_clock *mc, double ppb)

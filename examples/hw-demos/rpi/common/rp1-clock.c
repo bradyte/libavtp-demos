@@ -94,9 +94,6 @@
 
 /* Clock control bits */
 #define CLK_CTRL_ENABLE		(1 << 11)
-#define CLK_CTRL_AUXSRC_SHIFT	5
-#define CLK_CTRL_AUXSRC_MASK	(0x1f << CLK_CTRL_AUXSRC_SHIFT)
-#define CLK_CTRL_SRC_MASK	0x1
 
 /* PLL bits */
 #define PLL_CS_LOCK		(1u << 31)
@@ -107,16 +104,15 @@
 /* GP0 output enable is bit 0 of GPCLK_OE_CTRL */
 #define GP0_OE_BIT		(1 << 0)
 
-/* clk_gp0 parent: clk_i2s is AUXSRC index 10 */
-#define GP0_AUXSRC_I2S		10
-
-/* clk_i2s parent: pll_audio is AUXSRC index 1 */
-#define I2S_AUXSRC_PLL_AUDIO	1
+/* Parent selection lives in the device tree overlay. For reference, the
+ * AUXSRC indices it corresponds to are clk_i2s <- pll_audio (1) and
+ * clk_gp0 <- clk_i2s (10). */
 
 /* Clock domain targets */
 #define TARGET_VCO_HZ		1572864000.0	/* 12.288 MHz × 128 */
 #define TARGET_I2S_HZ		12288000.0	/* 256×fs, standard DAC MCLK */
-#define TARGET_GP0_HZ		300.0		/* 1 edge per CRF timestamp */
+/* The GP0 output rate is not fixed here: it is one edge per CRF timestamp,
+ * so the caller derives it from the stream profile and passes it in. */
 
 /* PLL fractional divider */
 #define F_XOSC_HZ		50000000.0
@@ -127,9 +123,6 @@
 /* VCO = F_XOSC × (FBDIV_INT + FBDIV_FRAC / 2^24) = 1,572,864,000 Hz */
 #define TARGET_FBDIV_INT	31
 #define TARGET_FBDIV_FRAC	0x75104D	/* 0.45728 × 2^24 */
-
-/* GP0 divider is fixed: clk_i2s / 300 Hz */
-#define GP0_NOMINAL_DIV_INT	((unsigned int)(TARGET_I2S_HZ / TARGET_GP0_HZ))
 
 struct rp1_clock {
 	struct devmem_region reg;
@@ -235,12 +228,19 @@ static int wait_for_sel(struct rp1_clock *h, uint32_t sel_reg, int timeout_us)
 	return -ETIMEDOUT;
 }
 
-int rp1_clock_enable(struct rp1_clock *handle)
+int rp1_clock_enable(struct rp1_clock *handle, double edge_hz)
 {
+	unsigned int gp0_div;
 	uint32_t ctrl, pwr;
 
-	if (!handle)
+	if (!handle || edge_hz <= 0.0)
 		return -EINVAL;
+
+	gp0_div = (unsigned int)(TARGET_I2S_HZ / edge_hz + 0.5);
+	if (gp0_div == 0) {
+		fprintf(stderr, "rp1-clock: %.1f Hz is above clk_i2s\n", edge_hz);
+		return -EINVAL;
+	}
 
 	/* Ensure PLL audio is powered on and locked */
 	pwr = reg_read(handle, PLL_AUDIO_PWR);
@@ -282,16 +282,14 @@ int rp1_clock_enable(struct rp1_clock *handle)
 		prim_div1, prim_div2, pll_out_hz / 1e6, i2s_div);
 	reg_write(handle, CLK_I2S_DIV_INT, i2s_div);
 
-	/* Enable clk_i2s: set AUXSRC to pll_audio (index 1), set SRC to AUX (1), enable */
+	/* Enable clk_i2s. Parent selection belongs to the device tree overlay,
+	 * which sets assigned-clock-parents; writing AUXSRC here as well gave
+	 * the clock tree two owners, and whichever ran first won. Only the
+	 * enable bit is touched. */
 	ctrl = reg_read(handle, CLK_I2S_CTRL);
 	if (!(ctrl & CLK_CTRL_ENABLE)) {
-		fprintf(stderr, "rp1-clock: enabling clk_i2s (AUXSRC=%d)...\n",
-			I2S_AUXSRC_PLL_AUDIO);
+		fprintf(stderr, "rp1-clock: enabling clk_i2s (parent from DT)...\n");
 
-		ctrl &= ~CLK_CTRL_AUXSRC_MASK;
-		ctrl |= (I2S_AUXSRC_PLL_AUDIO << CLK_CTRL_AUXSRC_SHIFT);
-		ctrl &= ~CLK_CTRL_SRC_MASK;
-		ctrl |= 1;
 		ctrl |= CLK_CTRL_ENABLE;
 		reg_write(handle, CLK_I2S_CTRL, ctrl);
 		usleep(100);
@@ -307,17 +305,13 @@ int rp1_clock_enable(struct rp1_clock *handle)
 	/* Enable clk_gp0: set AUXSRC to clk_i2s (index 10), fixed divider */
 	ctrl = reg_read(handle, CLK_GP0_CTRL);
 	if (!(ctrl & CLK_CTRL_ENABLE)) {
-		fprintf(stderr, "rp1-clock: enabling clk_gp0 (AUXSRC=%d, div=%u fixed)...\n",
-			GP0_AUXSRC_I2S, GP0_NOMINAL_DIV_INT);
+		fprintf(stderr, "rp1-clock: enabling clk_gp0 (parent from DT, "
+			"div=%u for %.1f Hz)...\n", gp0_div, edge_hz);
 
-		reg_write(handle, CLK_GP0_DIV_INT, GP0_NOMINAL_DIV_INT);
+		reg_write(handle, CLK_GP0_DIV_INT, gp0_div);
 		reg_write(handle, CLK_GP0_DIV_FRAC, 0);
 		usleep(10);
 
-		ctrl &= ~CLK_CTRL_AUXSRC_MASK;
-		ctrl |= (GP0_AUXSRC_I2S << CLK_CTRL_AUXSRC_SHIFT);
-		ctrl &= ~CLK_CTRL_SRC_MASK;
-		ctrl |= 1;
 		ctrl |= CLK_CTRL_ENABLE;
 		reg_write(handle, CLK_GP0_CTRL, ctrl);
 		usleep(100);
@@ -327,7 +321,14 @@ int rp1_clock_enable(struct rp1_clock *handle)
 		else
 			fprintf(stderr, "rp1-clock: clk_gp0 enabled\n");
 	} else {
-		fprintf(stderr, "rp1-clock: clk_gp0 already enabled\n");
+		/* Left running by a previous run that did not clean up. The
+		 * divider is reprogrammed regardless, so a stale rate from a
+		 * different profile cannot survive. */
+		fprintf(stderr, "rp1-clock: clk_gp0 already enabled, "
+			"reprogramming divider to %u for %.1f Hz\n",
+			gp0_div, edge_hz);
+		reg_write(handle, CLK_GP0_DIV_INT, gp0_div);
+		reg_write(handle, CLK_GP0_DIV_FRAC, 0);
 	}
 
 	/* Enable GPCLK0 output on GPIO pad */

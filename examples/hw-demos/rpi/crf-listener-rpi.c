@@ -40,10 +40,10 @@
  * i226 and a CS2600. Select with -B, or let it autodetect.
  *
  * Build:
- *   ninja -C build examples/hw-demos/aaf-crf/crf-listener-hw
+ *   ninja -C build examples/hw-demos/rpi/crf-listener-rpi
  *
  * Run:
- *   sudo chrt -f 80 taskset -c 2 ./build/examples/hw-demos/aaf-crf/crf-listener-hw \
+ *   sudo chrt -f 80 taskset -c 2 ./build/examples/hw-demos/rpi/crf-listener-rpi \
  *       -i eth1 -d 91:E0:F0:00:FE:00
  */
 
@@ -99,7 +99,6 @@ static bool synchronized;
 static uint64_t servo_update_count;
 static uint64_t pkt_dropped;
 static uint64_t edge_miss_count;
-static uint64_t last_edge_ts;
 
 /* Backend device path, meaning depends on the backend */
 static char device_path[64];
@@ -258,11 +257,6 @@ static void on_crf_timestamps(uint64_t *timestamps, int count, uint8_t seq,
 			continue;
 		}
 
-		/* if (verbose && last_edge_ts) {
-			int64_t jitter = (int64_t)(edge_ts - last_edge_ts) - 3333333;
-			fprintf(stdout, "extts_jitter_ns=%+" PRId64 "\n", jitter);
-		} */
-		last_edge_ts = edge_ts;
 
 		int64_t phase_error = (int64_t)(edge_ts - timestamps[i]);
 

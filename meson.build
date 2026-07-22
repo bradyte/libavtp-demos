@@ -127,10 +127,10 @@ if cmocka.found()
 	test_aaf_profile = executable(
 		'test-aaf-profile',
 		'unit/test-aaf-profile.c',
-		'examples/hw-demos/common/aaf-profile.c',
+		'examples/hw-demos/rpi/common/aaf-profile.c',
 		include_directories: [
 			include_directories('include'),
-			include_directories('examples/hw-demos/common'),
+			include_directories('examples/hw-demos/rpi/common'),
 		],
 		link_with: avtp_lib,
 		dependencies: cmocka,
@@ -140,10 +140,10 @@ if cmocka.found()
 	test_crf_profile = executable(
 		'test-crf-profile',
 		'unit/test-crf-profile.c',
-		'examples/hw-demos/common/crf-profile.c',
+		'examples/hw-demos/rpi/common/crf-profile.c',
 		include_directories: [
 			include_directories('include'),
-			include_directories('examples/hw-demos/common'),
+			include_directories('examples/hw-demos/rpi/common'),
 		],
 		link_with: avtp_lib,
 		dependencies: cmocka,
@@ -238,5 +238,4 @@ executable(
 	build_by_default: false,
 )
 
-subdir('examples/hw-demos/aaf-crf')
-subdir('examples/hw-demos/rpi5-demo')
+subdir('examples/hw-demos/rpi')

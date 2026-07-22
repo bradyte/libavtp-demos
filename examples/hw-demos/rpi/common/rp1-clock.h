@@ -47,9 +47,11 @@ struct rp1_clock;
  * Returns 0 on success, negative on error. */
 int rp1_clock_init(struct rp1_clock **handle);
 
-/* Enable clk_i2s and clk_gp0. Assumes DT has set parents and dividers.
+/* Enable clk_i2s and clk_gp0, dividing clk_i2s down to @edge_hz on GPCLK0.
+ * The rate comes from the CRF stream profile - one edge per timestamp - so
+ * nothing here assumes 300 Hz.
  * Returns 0 on success, negative on error. */
-int rp1_clock_enable(struct rp1_clock *handle);
+int rp1_clock_enable(struct rp1_clock *handle, double edge_hz);
 
 /* Adjust pll_audio VCO frequency by ppb (parts-per-billion).
  * Positive ppb = speed up clock. Clamped to ±100 ppm authority.

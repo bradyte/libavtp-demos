@@ -53,8 +53,8 @@
 #include "avtp_crf.h"
 #include "crf-profile.h"
 
-/* Reference encoding produced by crf-talker-hw.c init_pdu() with the Table 28
- * profile. Captured from the working CM4 talker; any change to crf_pdu_init()
+/* Reference encoding captured from the pre-refactor crf-talker-hw.c,
+ * before init_pdu() was replaced. Any change to crf_pdu_init()
  * that alters the wire format will fail against this. */
 static const uint8_t talker_header[] = {
 	0x04, 0x80, 0x00, 0x01, 0xaa, 0xbb, 0xcc, 0xdd,

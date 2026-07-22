@@ -46,8 +46,8 @@
 #include "avtp_aaf.h"
 #include "aaf-profile.h"
 
-/* Reference encoding produced by aaf-talker-hw.c init_pdu() with the default
- * profile, captured before the refactor. Any change to aaf_pdu_init() that
+/* Reference encoding captured from the pre-refactor aaf-talker-hw.c,
+ * before init_pdu() was replaced. Any change to aaf_pdu_init() that
  * alters the wire format fails against this. */
 static const uint8_t talker_header[] = {
 	0x02, 0x81, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd,

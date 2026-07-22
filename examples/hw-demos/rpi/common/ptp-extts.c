@@ -31,7 +31,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/select.h>
+#include <poll.h>
 #include <unistd.h>
 
 #include "ptp-extts.h"
@@ -122,16 +122,12 @@ int ptp_extts_read(int ptp_fd, unsigned int channel, uint64_t *timestamp_ns)
 	return extts_read_one(ptp_fd, channel, timestamp_ns);
 }
 
-int ptp_extts_read_nonblock(int ptp_fd, unsigned int channel,
-			    uint64_t *timestamp_ns)
+int ptp_extts_read_timeout(int ptp_fd, unsigned int channel,
+			   uint64_t *timestamp_ns, int timeout_ms)
 {
-	struct timeval tv = { 0 };
-	fd_set fds;
+	struct pollfd pfd = { .fd = ptp_fd, .events = POLLIN };
 
-	FD_ZERO(&fds);
-	FD_SET(ptp_fd, &fds);
-
-	if (select(ptp_fd + 1, &fds, NULL, NULL, &tv) <= 0)
+	if (timeout_ms >= 0 && poll(&pfd, 1, timeout_ms) <= 0)
 		return -1;
 
 	return extts_read_one(ptp_fd, channel, timestamp_ns);

@@ -6,9 +6,9 @@
  *
  * Build:
  *   gcc -O2 -o sdp-capture-test sdp-capture-test.c \
- *       ../../common/phc-utils.c ../../common/ptp-extts.c \
- *       ../../common/bcm2711-pwm-clock.c \
- *       -I../../common -I../../../.. -I../../../../include -lm
+ *       ../common/phc-utils.c ../common/ptp-extts.c \
+ *       ../common/bcm2711-pwm-clock.c \
+ *       -I../common -I../../../.. -I../../../../include -lm
  *
  * Usage: sdp-capture-test -i <ifname> -g <gpio-pin>
  */

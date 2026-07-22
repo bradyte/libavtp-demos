@@ -18,11 +18,11 @@
  *
  * Usage:
  *   CM4 + i226, AF_XDP on queue 0:
- *     sudo chrt -f 80 taskset -c 3 ./aaf-listener-hw \
+ *     sudo chrt -f 80 taskset -c 3 ./aaf-listener-rpi \
  *         -i eth1 -d 91:E0:F0:00:FE:01 -t 500 -a hw:1,0 -q 0
  *
  *   Stock Raspberry Pi 5, AF_PACKET:
- *     sudo chrt -f 80 taskset -c 3 ./aaf-listener-hw \
+ *     sudo chrt -f 80 taskset -c 3 ./aaf-listener-rpi \
  *         -i eth0 -d 91:E0:F0:00:FE:01 -t 500 -a hw:0,0
  */
 

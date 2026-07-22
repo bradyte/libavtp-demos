@@ -36,10 +36,10 @@
  * PHC provides sub-nanosecond timestamps of each rising edge.
  *
  * Build:
- *   ninja -C build examples/hw-demos/aaf-crf/crf-talker-hw
+ *   ninja -C build examples/hw-demos/rpi/crf-talker-rpi
  *
  * Run:
- *   sudo chrt -f 80 taskset -c 2 ./build/examples/hw-demos/aaf-crf/crf-talker-hw \
+ *   sudo chrt -f 80 taskset -c 2 ./build/examples/hw-demos/rpi/crf-talker-rpi \
  *       -i eth1 -d 91:E0:F0:00:FE:00
  */
 
@@ -72,7 +72,6 @@
 static struct crf_profile profile;
 
 static char ifname[IFNAMSIZ];
-static int verbose;
 static uint8_t macaddr[ETH_ALEN];
 static volatile int running = 1;
 static uint64_t last_edge_ts;
@@ -117,7 +116,6 @@ err:
 static struct argp_option options[] = {
 	{"dst-addr", 'd', "MACADDR", 0, "Stream Destination MAC address" },
 	{"ifname", 'i', "IFNAME", 0, "Network Interface" },
-	{"verbose", 'v', 0, 0, "Print per-edge EXTTS jitter to stdout" },
 	{ 0 }
 };
 
@@ -139,9 +137,6 @@ static error_t parser(int key, char *arg, struct argp_state *state)
 	case 'i':
 		strncpy(ifname, arg, sizeof(ifname) - 1);
 		break;
-	case 'v':
-		verbose = 1;
-		break;
 	}
 
 	return 0;
@@ -157,6 +152,7 @@ static void sig_handler(int signum)
 int main(int argc, char *argv[])
 {
 	int sk_fd, res;
+	int rc = 1;		/* failure unless the run completes */
 	int ptp_fd = -1;
 	clockid_t phc_clk;
 	uint8_t seq_num = 0;
@@ -190,7 +186,7 @@ int main(int argc, char *argv[])
 	res = ptp_pin_setfunc(ptp_fd, 0, 1, 1);
 	if (res < 0) {
 		fprintf(stderr, "Failed to configure SDP0 pin\n");
-		goto err_phc;
+		goto out_phc;
 	}
 
 	ptp_extts_disable(ptp_fd, 1);
@@ -198,20 +194,20 @@ int main(int argc, char *argv[])
 	res = ptp_extts_enable(ptp_fd, 1, 1);
 	if (res < 0) {
 		fprintf(stderr, "Failed to enable extts on channel 1\n");
-		goto err_phc;
+		goto out_phc;
 	}
 
 	sk_fd = create_talker_socket(-1);
 	if (sk_fd < 0)
-		goto err_extts;
+		goto out_extts;
 
 	res = setup_socket_address(sk_fd, ifname, macaddr, ETH_P_TSN, &sk_addr);
 	if (res < 0)
-		goto err_sk;
+		goto out_sk;
 
 	res = crf_pdu_init(pdu, &profile);
 	if (res < 0)
-		goto err_sk;
+		goto out_sk;
 
 	fprintf(stderr, "CRF Talker — hardware timestamped (SDP0, channel 1)\n");
 	fprintf(stderr, "  Interface: %s\n", ifname);
@@ -308,10 +304,6 @@ int main(int argc, char *argv[])
 			stall_count = 0;
 		}
 
-		/* if (verbose && last_edge_ts) {
-			int64_t jitter = (int64_t)(ts - last_edge_ts) - 3333333;
-			fprintf(stdout, "extts_jitter_ns=%+" PRId64 "\n", jitter);
-		} */
 
 		last_edge_ts = ts;
 		pdu->crf_data[ts_idx++] = htobe64(ts);
@@ -352,11 +344,13 @@ int main(int argc, char *argv[])
 		" timestamps)\n", pkt_count,
 		pkt_count * profile.timestamps_per_pdu);
 
-err_sk:
+	rc = 0;
+
+out_sk:
 	close(sk_fd);
-err_extts:
+out_extts:
 	ptp_extts_disable(ptp_fd, 1);
-err_phc:
+out_phc:
 	phc_close(ptp_fd);
-	return 0;
+	return rc;
 }

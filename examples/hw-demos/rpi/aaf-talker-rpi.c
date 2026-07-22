@@ -6,7 +6,7 @@
  * now + configurable offset (microseconds).
  *
  * Usage:
- *   sudo ./aaf-talker-hw -i eth1 -d 91:E0:F0:00:FE:01 -t 2000 -a hw:1,0
+ *   sudo ./aaf-talker-rpi -i eth1 -d 91:E0:F0:00:FE:01 -t 2000 -a hw:1,0
  */
 
 #include <alsa/asoundlib.h>

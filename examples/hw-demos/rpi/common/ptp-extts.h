@@ -78,7 +78,11 @@ int ptp_extts_disable(int ptp_fd, unsigned int index);
  * Returns 0 on success, -1 on error. */
 int ptp_extts_read(int ptp_fd, unsigned int channel, uint64_t *timestamp_ns);
 
-/* As above but returns -1 immediately when no event is queued.
- * Returns 0 on success, -1 if nothing is ready or on error. */
-int ptp_extts_read_nonblock(int ptp_fd, unsigned int channel,
-			    uint64_t *timestamp_ns);
+/* As above with a bound on how long to wait.
+ *
+ * @timeout_ms: 0 returns immediately if nothing is queued, a positive value
+ *              waits at most that long, negative blocks like the above.
+ *
+ * Returns 0 on success, -1 if nothing arrived in time or on error. */
+int ptp_extts_read_timeout(int ptp_fd, unsigned int channel,
+			   uint64_t *timestamp_ns, int timeout_ms);
